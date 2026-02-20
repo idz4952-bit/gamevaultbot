@@ -10,13 +10,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def main():
     if not TOKEN:
-raise RuntimeError("TOKEN is missing")
+        raise RuntimeError("TOKEN is missing")
 
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
 
     print("Bot is running...")
-    await app.run_polling()
+    await app.run_polling(close_loop=False)
 
 if __name__ == "__main__":
     asyncio.run(main())
