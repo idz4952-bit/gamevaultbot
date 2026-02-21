@@ -1,145 +1,129 @@
 import os
-from telegram import Update, ReplyKeyboardMarkup
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+)
 
 TOKEN = os.environ["TOKEN"]
 
-# ===== Keyboards =====
+# ===== MENUS =====
 
-main_menu = ReplyKeyboardMarkup(
-    [
-        ["🛍 Explore Products", "📝 MANUAL ORDER"],
-        ["📦 MY ORDERS", "💰 MY WALLET"],
-        ["☎️ CONTACT SUPPORT"],
-    ],
-    resize_keyboard=True,
-)
+def main_menu():
+    keyboard = [
+        [InlineKeyboardButton("🛍 Explore Products", callback_data="products")],
+        [InlineKeyboardButton("📝 MANUAL ORDER", callback_data="manual")],
+        [InlineKeyboardButton("📦 MY ORDERS", callback_data="orders")],
+        [InlineKeyboardButton("💰 MY WALLET", callback_data="wallet")],
+        [InlineKeyboardButton("☎️ CONTACT SUPPORT", callback_data="support")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-products_menu = ReplyKeyboardMarkup(
-    [
-        ["🎮 PUBG MOBILE UC CODES"],
-        ["💎 FREE FIRE PINS"],
-        ["⭐ LUDO STAR"],
-        ["🍏 ITUNES GIFTCARDS"],
-        ["🔥 STEAM GIFTCARDS"],
-        ["🎮 PLAYSTATION GIFTCARDS"],
-        ["🤖 ROBLOX"],
-        ["🔙 Back"],
-    ],
-    resize_keyboard=True,
-)
 
-manual_menu = ReplyKeyboardMarkup(
-    [
-        ["🆔 GAMES ID"],
-        ["⚙️ APPLICATION SERVICES"],
-        ["🔙 Back"],
-    ],
-    resize_keyboard=True,
-)
+def products_menu():
+    keyboard = [
+        [InlineKeyboardButton("🎮 PUBG UC", callback_data="pubg")],
+        [InlineKeyboardButton("💎 FREE FIRE", callback_data="freefire")],
+        [InlineKeyboardButton("⭐ LUDO STAR", callback_data="ludo")],
+        [InlineKeyboardButton("🍏 ITUNES", callback_data="itunes")],
+        [InlineKeyboardButton("🔥 STEAM", callback_data="steam")],
+        [InlineKeyboardButton("🔙 Back", callback_data="back")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-wallet_menu = ReplyKeyboardMarkup(
-    [
-        ["🟣 BYBIT ID", "🟡 BINANCE ID"],
-        ["🔗 USDT TRC20", "🔗 USDT BEP20"],
-        ["📊 MY TRANSACTIONS"],
-        ["🔙 Back"],
-    ],
-    resize_keyboard=True,
-)
 
-# ===== Handlers =====
+def manual_menu():
+    keyboard = [
+        [InlineKeyboardButton("🆔 GAMES ID", callback_data="gamesid")],
+        [InlineKeyboardButton("⚙️ APPLICATION SERVICES", callback_data="apps")],
+        [InlineKeyboardButton("🔙 Back", callback_data="back")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+def wallet_menu():
+    keyboard = [
+        [InlineKeyboardButton("🟣 BYBIT", callback_data="bybit")],
+        [InlineKeyboardButton("🟡 BINANCE", callback_data="binance")],
+        [InlineKeyboardButton("🔗 TRC20", callback_data="trc20")],
+        [InlineKeyboardButton("🔗 BEP20", callback_data="bep20")],
+        [InlineKeyboardButton("📊 TRANSACTIONS", callback_data="transactions")],
+        [InlineKeyboardButton("🔙 Back", callback_data="back")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+
+# ===== START =====
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "🎮 GameVault\n\nاختر من القائمة 👇"
-    await update.message.reply_text(text, reply_markup=main_menu)
+    await update.message.reply_text(
+        "🎮 GameVault\n\nاختر من القائمة 👇",
+        reply_markup=main_menu(),
+    )
 
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text
+# ===== BUTTON HANDLER =====
 
-    # ===== Explore Products =====
-    if text == "🛍 Explore Products":
-        msg = """🛒 Product Categories:
+async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-Explore our premium selection of gaming cards below 👇"""
-        await update.message.reply_text(msg, reply_markup=products_menu)
+    data = query.data
 
-    elif text in [
-        "🎮 PUBG MOBILE UC CODES",
-        "💎 FREE FIRE PINS",
-        "⭐ LUDO STAR",
-        "🍏 ITUNES GIFTCARDS",
-        "🔥 STEAM GIFTCARDS",
-        "🎮 PLAYSTATION GIFTCARDS",
-        "🤖 ROBLOX",
-    ]:
-        await update.message.reply_text(
-            f"📦 اخترت:\n{text}\n\nقريبًا سيتم إضافة المنتجات 👍",
-            reply_markup=products_menu,
+    if data == "products":
+        await query.edit_message_text(
+            "🛒 Product Categories",
+            reply_markup=products_menu(),
         )
 
-    # ===== Manual Order =====
-    elif text == "📝 MANUAL ORDER":
-        msg = """💡 Select a service category:
+    elif data == "manual":
+        await query.edit_message_text(
+            "💡 اختر نوع الطلب",
+            reply_markup=manual_menu(),
+        )
 
-Working Hours: 12 PM - 12 AM
-Time Zone: GMT+2"""
-        await update.message.reply_text(msg, reply_markup=manual_menu)
+    elif data == "wallet":
+        await query.edit_message_text(
+            "💰 WALLET OVERVIEW\nBalance: 74$",
+            reply_markup=wallet_menu(),
+        )
 
-    elif text == "🆔 GAMES ID":
-        await update.message.reply_text("📩 أرسل Game ID الخاص بك", reply_markup=manual_menu)
+    elif data == "orders":
+        await query.edit_message_text(
+            "📦 Orders\n\nلا توجد طلبات حاليا",
+            reply_markup=main_menu(),
+        )
 
-    elif text == "⚙️ APPLICATION SERVICES":
-        await update.message.reply_text("🛠 اختر الخدمة المطلوبة", reply_markup=manual_menu)
+    elif data == "support":
+        await query.edit_message_text(
+            "☎️ تواصل مع الدعم @support",
+            reply_markup=main_menu(),
+        )
 
-    # ===== Orders =====
-    elif text == "📦 MY ORDERS":
-        msg = """📦 My Orders
-
-ORDER #12345
-✅ Status: COMPLETED
-📅 Date: 2026-02-19
-🎮 Product: PUBG CHECKER
-💰 Total: $10"""
-        await update.message.reply_text(msg, reply_markup=main_menu)
-
-    # ===== Wallet =====
-    elif text == "💰 MY WALLET":
-        msg = """💼 WALLET OVERVIEW
-
-Balance: 74.50$
-
-Choose deposit method 👇"""
-        await update.message.reply_text(msg, reply_markup=wallet_menu)
-
-    elif text in ["🟣 BYBIT ID", "🟡 BINANCE ID", "🔗 USDT TRC20", "🔗 USDT BEP20"]:
-        await update.message.reply_text("📩 سيتم عرض تفاصيل الدفع هنا", reply_markup=wallet_menu)
-
-    elif text == "📊 MY TRANSACTIONS":
-        await update.message.reply_text("📈 لا توجد معاملات حالياً", reply_markup=wallet_menu)
-
-    # ===== Contact =====
-    elif text == "☎️ CONTACT SUPPORT":
-        await update.message.reply_text("📞 تواصل مع الدعم: @support", reply_markup=main_menu)
-
-    # ===== Back =====
-    elif text == "🔙 Back":
-        await update.message.reply_text("رجعنا للقائمة الرئيسية 👇", reply_markup=main_menu)
+    elif data == "back":
+        await query.edit_message_text(
+            "🎮 القائمة الرئيسية",
+            reply_markup=main_menu(),
+        )
 
     else:
-        await update.message.reply_text("اختر من القائمة 👇", reply_markup=main_menu)
+        await query.edit_message_text(
+            f"📌 اخترت: {data}",
+            reply_markup=main_menu(),
+        )
 
 
-# ===== Run Bot =====
+# ===== RUN =====
 
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    app.add_handler(CallbackQueryHandler(buttons))
 
-    print("Bot started...")
+    print("Bot running...")
     app.run_polling()
 
 
