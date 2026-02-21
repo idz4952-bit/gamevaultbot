@@ -1,191 +1,201 @@
 import os
-from telegram import (
-    Update,
-    ReplyKeyboardMarkup,
-    KeyboardButton,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    MessageHandler,
-    CallbackQueryHandler,
-    ContextTypes,
-    filters,
-)
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 
 TOKEN = os.environ.get("TOKEN")
-if not TOKEN:
-    raise RuntimeError("TOKEN env var is missing")
 
+# ====== نصوص ثابتة ======
+HOME_TEXT = (
+    "👋 مرحباً بك في *GameVault* 🎮\n\n"
+    "اختر من القائمة:"
+)
 
-# ---------- Reply Keyboard (تحت خانة الكتابة) ----------
-def kb_main_reply():
-    return ReplyKeyboardMarkup(
-        [
-            [KeyboardButton("🛒 Explore Products"), KeyboardButton("⚡ Auto PUBG ID")],
-            [KeyboardButton("⚡ MANUAL ORDER"), KeyboardButton("🔎 PUBG CHECKER")],
-            [KeyboardButton("📦 MY ORDERS"), KeyboardButton("💵 MY WALLET")],
-            [KeyboardButton("☎️ CONTACT SUPPORT")],
-        ],
-        resize_keyboard=True,
-    )
+PRODUCTS_TEXT = (
+    "🛒 *CODES & Gift Cards*\n\n"
+    "📦 *Product Categories:*\n"
+    "Explore our premium selection below.\n\n"
+    "✅ *Stock Guarantee:*\n"
+    "All cards valid for 1-year storage."
+)
 
+MANUAL_TEXT = (
+    "⚡ *MANUAL ORDER*\n\n"
+    "💡 Select a service category:\n"
+    "Choose from offers, manual top-ups, or services.\n\n"
+    "⏰ Working Hours: 12:00 PM - 12:00 AM\n"
+    "🌍 Time Zone: Algeria (GMT+1)"
+)
 
-# ---------- Inline Keyboards (داخل المحادثة) ----------
-def kb_products_inline():
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🪂 PUBG MOBILE UC CODES", callback_data="cat:pubg_uc")],
-            [InlineKeyboardButton("💎 GARENA FREE FIRE PINS", callback_data="cat:free_fire")],
-            [InlineKeyboardButton("⭐ Ludo Star Hearts | Royal Points", callback_data="cat:ludo")],
-            [InlineKeyboardButton("🍏 iTunes [USA] GIFTCARDS", callback_data="cat:itunes")],
-            [InlineKeyboardButton("🔥 STEAM [USA] GIFTCARDS", callback_data="cat:steam")],
-            [InlineKeyboardButton("🎮 PLAYSTATION [USA] GIFTCARDS", callback_data="cat:ps")],
-            [InlineKeyboardButton("🕹 ROBLOX [USA]", callback_data="cat:roblox")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="back:main")],
-        ]
-    )
+ORDERS_TEXT = (
+    "📦 *My Orders*\n\n"
+    "لا توجد طلبات حالياً.\n"
+    " (لاحقاً نربطه بقاعدة البيانات)"
+)
 
+WALLET_TEXT = (
+    "💰 *WALLET OVERVIEW*\n\n"
+    "Telegram ID: (لاحقاً)\n"
+    "Balance: 0.00$\n\n"
+    "Choose your preferred deposit method:"
+)
 
-def kb_manual_inline():
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🎮 [MANUAL] GAMES ID", callback_data="manual:games_id")],
-            [InlineKeyboardButton("⚙️ APPLICATION SERVICES", callback_data="manual:apps")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="back:main")],
-        ]
-    )
+SUPPORT_TEXT = (
+    "☎️ *CONTACT SUPPORT*\n\n"
+    "اكتب رسالتك هنا وسيتم الرد عليك قريباً.\n"
+    "(لاحقاً نربطها بإيميل/قناة دعم)"
+)
 
+# ====== لوحات الأزرار (Inline) ======
+def home_kb() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("🛒 Explore Products", callback_data="nav:products")],
+        [InlineKeyboardButton("⚡ MANUAL ORDER", callback_data="nav:manual")],
+        [InlineKeyboardButton("📦 MY ORDERS", callback_data="nav:orders")],
+        [InlineKeyboardButton("💰 MY WALLET", callback_data="nav:wallet")],
+        [InlineKeyboardButton("☎️ CONTACT SUPPORT", callback_data="nav:support")],
+    ]
+    return InlineKeyboardMarkup(buttons)
 
-def kb_wallet_inline():
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🆔 BYBIT ID", callback_data="wallet:bybit")],
-            [InlineKeyboardButton("🆔 BINANCE ID", callback_data="wallet:binance")],
-            [InlineKeyboardButton("🔗 USDT [TRC20]", callback_data="wallet:trc20")],
-            [InlineKeyboardButton("🔗 USDT [BEP20]", callback_data="wallet:bep20")],
-            [InlineKeyboardButton("📜 MY TRANSACTIONS", callback_data="wallet:tx")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="back:main")],
-        ]
-    )
+def back_kb() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="nav:back")],
+        [InlineKeyboardButton("🏠 الرئيسية", callback_data="nav:home")],
+    ])
 
+def wallet_kb() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("🆔 BYBIT ID", callback_data="wallet:bybit")],
+        [InlineKeyboardButton("🆔 BINANCE ID", callback_data="wallet:binance")],
+        [InlineKeyboardButton("🔗 USDT [TRC20]", callback_data="wallet:trc20")],
+        [InlineKeyboardButton("🔗 USDT [BEP20]", callback_data="wallet:bep20")],
+        [InlineKeyboardButton("🧾 MY TRANSACTIONS", callback_data="wallet:tx")],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="nav:back")],
+        [InlineKeyboardButton("🏠 الرئيسية", callback_data="nav:home")],
+    ]
+    return InlineKeyboardMarkup(buttons)
 
-# ---------- Pages ----------
-async def show_main(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "🎮 أهلاً بك في GameVault!\nاختر من القائمة بالأسفل 👇",
-        reply_markup=kb_main_reply(),
-    )
+def products_kb() -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton("🎮 PUBG MOBILE UC CODES", callback_data="prod:pubg_uc")],
+        [InlineKeyboardButton("💎 GARENA FREE FIRE PINS", callback_data="prod:ff_pins")],
+        [InlineKeyboardButton("⭐ Ludo Star Hearts | Royal Points", callback_data="prod:ludo")],
+        [InlineKeyboardButton("🍏 iTunes [USA] GIFTCARDS", callback_data="prod:itunes")],
+        [InlineKeyboardButton("🔥 STEAM [USA] GIFTCARDS", callback_data="prod:steam")],
+        [InlineKeyboardButton("🎮 PLAYSTATION [USA] GIFTCARDS", callback_data="prod:ps")],
+        [InlineKeyboardButton("🎮 ROBLOX [USA]", callback_data="prod:roblox")],
+        [InlineKeyboardButton("⬅️ رجوع", callback_data="nav:back")],
+        [InlineKeyboardButton("🏠 الرئيسية", callback_data="nav:home")],
+    ]
+    return InlineKeyboardMarkup(buttons)
 
+# ====== أدوات تنقّل (Back Stack) ======
+def push_page(context: ContextTypes.DEFAULT_TYPE, page: str):
+    stack = context.user_data.get("stack", [])
+    stack.append(page)
+    context.user_data["stack"] = stack
 
-async def show_products(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "🛒 CODES & Gift Cards\n\n"
-        "📦 Product Categories:\n"
-        "Explore our premium selection of official gaming cards and digital services below.\n\n"
-        "✅ Stock Guarantee:\n"
-        "All cards valid for 1-year storage."
-    )
-    await update.message.reply_text(text, reply_markup=kb_products_inline())
+def pop_page(context: ContextTypes.DEFAULT_TYPE) -> str:
+    stack = context.user_data.get("stack", [])
+    if stack:
+        stack.pop()
+    context.user_data["stack"] = stack
+    return stack[-1] if stack else "home"
 
+def current_page(context: ContextTypes.DEFAULT_TYPE) -> str:
+    stack = context.user_data.get("stack", [])
+    return stack[-1] if stack else "home"
 
-async def show_manual(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (
-        "⚡ MANUAL ORDER\n\n"
-        "💡 Select a service category:\n"
-        "Choose from PUBG offers, manual game top-ups, or application services.\n\n"
-        "⏰ Working Hours: 12:00 PM - 12:00 AM\n"
-        "🌍 Time Zone: Algeria (GMT+1)"
-    )
-    await update.message.reply_text(text, reply_markup=kb_manual_inline())
+async def render_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: str):
+    # تحديد محتوى كل صفحة
+    if page == "home":
+        text, kb = HOME_TEXT, home_kb()
+    elif page == "products":
+        text, kb = PRODUCTS_TEXT, products_kb()
+    elif page == "manual":
+        text, kb = MANUAL_TEXT, back_kb()
+    elif page == "orders":
+        text, kb = ORDERS_TEXT, back_kb()
+    elif page == "wallet":
+        text, kb = WALLET_TEXT, wallet_kb()
+    elif page == "support":
+        text, kb = SUPPORT_TEXT, back_kb()
+    else:
+        text, kb = HOME_TEXT, home_kb()
+        page = "home"
 
+    # تعديل نفس الرسالة (Inline)
+    q = update.callback_query
+    if q:
+        await q.edit_message_text(text=text, reply_markup=kb, parse_mode="Markdown")
 
-async def show_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = (
-        "💵 WALLET OVERVIEW\n\n"
-        f"🆔 Telegram ID: {user_id}\n"
-        "💰 Balance: 0.000$\n\n"
-        "Choose your preferred USDT deposit method:"
-    )
-    await update.message.reply_text(text, reply_markup=kb_wallet_inline())
+# ====== Handlers ======
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not TOKEN:
+        await update.message.reply_text("❌ TOKEN غير موجود في Environment Variables")
+        return
 
+    context.user_data["stack"] = ["home"]
+    await update.message.reply_text(HOME_TEXT, reply_markup=home_kb(), parse_mode="Markdown")
 
-# ---------- Text Router (للأزرار تحت خانة الكتابة) ----------
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    t = (update.message.text or "").strip()
-
-    if t in ("/start", "Menu", "القائمة"):
-        return await show_main(update, context)
-
-    if t == "🛒 Explore Products":
-        return await show_products(update, context)
-
-    if t == "⚡ MANUAL ORDER":
-        return await show_manual(update, context)
-
-    if t == "💵 MY WALLET":
-        return await show_wallet(update, context)
-
-    # باقي الأزرار (placeholder)
-    if t == "📦 MY ORDERS":
-        return await update.message.reply_text("📦 MY ORDERS (قريباً) ✅", reply_markup=kb_main_reply())
-    if t == "☎️ CONTACT SUPPORT":
-        return await update.message.reply_text("☎️ اكتب رسالتك للدعم هنا ✅", reply_markup=kb_main_reply())
-    if t == "⚡ Auto PUBG ID":
-        return await update.message.reply_text("⚡ Auto PUBG ID (قريباً) ✅", reply_markup=kb_main_reply())
-    if t == "🔎 PUBG CHECKER":
-        return await update.message.reply_text("🔎 PUBG CHECKER (قريباً) ✅", reply_markup=kb_main_reply())
-
-    await update.message.reply_text("اكتب Menu للرجوع للقائمة ✅", reply_markup=kb_main_reply())
-
-
-# ---------- Callback Router (للأزرار داخل المحادثة) ----------
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
+
     data = q.data
 
-    # رجوع للقائمة (نعدل نفس الرسالة بدل إرسال رسالة جديدة)
-    if data == "back:main":
-        return await q.edit_message_text(
-            "✅ رجعت للقائمة. استخدم الأزرار أسفل خانة الكتابة 👇"
-        )
+    # تنقل رئيسي
+    if data.startswith("nav:"):
+        action = data.split(":", 1)[1]
 
-    # اختيار قسم منتجات
-    if data.startswith("cat:"):
-        cat = data.split(":", 1)[1]
-        return await q.edit_message_text(
-            f"✅ اخترت القسم: {cat}\n(الخطوة التالية: نعرض المنتجات والأسعار هنا)",
-            reply_markup=kb_products_inline(),
-        )
+        if action == "home":
+            context.user_data["stack"] = ["home"]
+            await render_page(update, context, "home")
+            return
 
-    # Wallet options
+        if action == "back":
+            page = pop_page(context)
+            await render_page(update, context, page)
+            return
+
+        # انتقال لصفحة جديدة
+        page = action  # products/manual/orders/wallet/support
+        # لا نكرر نفس الصفحة مرتين
+        if current_page(context) != page:
+            push_page(context, page)
+        await render_page(update, context, page)
+        return
+
+    # أزرار المنتجات (حاليا مثال فقط)
+    if data.startswith("prod:"):
+        await q.edit_message_text(
+            text=f"✅ اخترت: *{data.split(':',1)[1]}*\n\n(لاحقاً نعرض المنتجات والأسعار هنا)\n",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ رجوع", callback_data="nav:back")],
+                [InlineKeyboardButton("🏠 الرئيسية", callback_data="nav:home")],
+            ]),
+            parse_mode="Markdown",
+        )
+        return
+
+    # أزرار المحفظة (مثال)
     if data.startswith("wallet:"):
-        w = data.split(":", 1)[1]
-        return await q.edit_message_text(
-            f"✅ خيار محفظة: {w}\n(الخطوة التالية: نعرض العنوان/المعرف/المعاملات)",
-            reply_markup=kb_wallet_inline(),
+        await q.edit_message_text(
+            text=f"✅ خيار محفظة: *{data.split(':',1)[1]}*\n\n(لاحقاً نضيف التفاصيل هنا)",
+            reply_markup=wallet_kb(),
+            parse_mode="Markdown",
         )
+        return
 
-    # Manual options
-    if data.startswith("manual:"):
-        m = data.split(":", 1)[1]
-        return await q.edit_message_text(
-            f"✅ خيار طلب يدوي: {m}\n(الخطوة التالية: نسألك عن البيانات وننشئ الطلب)",
-            reply_markup=kb_manual_inline(),
-        )
+def main():
+    if not TOKEN:
+        raise RuntimeError("TOKEN is missing in environment variables")
 
-
-def run():
     app = ApplicationBuilder().token(TOKEN).build()
-    app.add_handler(CommandHandler("start", show_main))
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
+
+    print("Bot started...")
     app.run_polling()
 
-
 if __name__ == "__main__":
-    run()
+    main()
