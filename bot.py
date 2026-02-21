@@ -2,7 +2,7 @@ import os
 from telegram import Update
 from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TOKEN = os.getenv("TOKEN")  # نفس الاسم اللي حاطه في Render: TOKEN
+TOKEN = os.getenv("TOKEN")  # Render variable name: TOKEN
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🎮 مرحبا بك في GameVault 🔐")
@@ -13,7 +13,9 @@ def main():
 
     app = ApplicationBuilder().token(TOKEN).build()
     app.add_handler(CommandHandler("start", start))
-    app.run_polling()
+
+    print("Bot is running...")
+    app.run_polling()  # لا asyncio.run ولا await
 
 if __name__ == "__main__":
     main()
