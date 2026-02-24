@@ -1,344 +1,147 @@
-import os
-from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+import os, sqlite3
+from telegram import *
+from telegram.ext import *
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters,
-)
+TOKEN=os.getenv("TOKEN")
+ADMIN_ID=int(os.getenv("ADMIN_ID","0"))
+USDT_ADDRESS=os.getenv("USDT_ADDRESS","PUT_ADDRESS")
 
-# =========================
-# Config
-# =========================
-TOKEN = os.environ.get("TOKEN")
 if not TOKEN:
-    raise RuntimeError("TOKEN env var is missing")
+    raise RuntimeError("TOKEN missing")
 
-CURRENCY = "$"
+# ===== DATABASE =====
+db=sqlite3.connect("shop.db",check_same_thread=False)
+cur=db.cursor()
 
-# =========================
-# Data Models
-# =========================
-@dataclass
-class Product:
-    pid: str
-    title: str
-    price: float
-    stock: int
+cur.execute("CREATE TABLE IF NOT EXISTS users(id INTEGER PRIMARY KEY,balance REAL DEFAULT 0)")
+cur.execute("""CREATE TABLE IF NOT EXISTS orders(
+id INTEGER PRIMARY KEY AUTOINCREMENT,
+user_id INTEGER,product TEXT,qty INTEGER,total REAL,status TEXT DEFAULT 'pending')""")
+db.commit()
 
+# ===== PRODUCTS =====
+CATALOG={
+"PUBG":[["60 UC",0.875,500],["325 UC",4.375,100]],
+"iTunes":[["10$",9.2,50],["25$",23,20]],
+"Free Fire":[["100 Diamonds",1.2,1000]]
+}
 
-@dataclass
-class Category:
-    cid: str
-    title: str
-    products: List[Product]
+# ===== MENUS =====
+menu=ReplyKeyboardMarkup(
+[["🛍 الأقسام","💳 محفظتي"],
+["➕ شحن","📦 طلباتي"]],
+resize_keyboard=True)
 
+def cats_kb():
+    return InlineKeyboardMarkup([[InlineKeyboardButton(c,callback_data=f"cat:{c}")]for c in CATALOG])
 
-# =========================
-# Catalog (مثل صورك)
-# =========================
-CATALOG: List[Category] = [
-    Category(
-        cid="pubg_uc",
-        title="🪂 PUBG MOBILE UC CODES",
-        products=[
-            Product("pubg_60", "60 UC", 0.875, 4690),
-            Product("pubg_325", "325 UC", 4.375, 0),
-            Product("pubg_660", "660 UC", 8.750, 0),
-            Product("pubg_1800", "1800 UC", 22.000, 0),
-            Product("pubg_3850", "3850 UC", 44.000, 0),
-            Product("pubg_8100", "8100 UC", 88.000, 0),
-        ],
-    ),
-    Category(
-        cid="free_fire",
-        title="💎 GARENA FREE FIRE PINS",
-        products=[
-            Product("ff_1", "1 USD - 100+10", 0.920, 196),
-            Product("ff_2", "2 USD - 210+21", 1.840, 0),
-            Product("ff_5", "5 USD - 530+53", 4.600, 0),
-            Product("ff_10", "10 USD - 1080+108", 9.200, 0),
-            Product("ff_20", "20 USD - 2200+220", 18.400, 0),
-        ],
-    ),
-    Category(
-        cid="ludo",
-        title="⭐ Ludo Star Hearts | Royal Points",
-        products=[
-            Product("ludo_3_7", "3.7K Hearts + 10 RP", 9.000, 13),
-            Product("ludo_7_5", "7.5K Hearts + 20 RP", 18.000, 10),
-            Product("ludo_24", "24K Hearts + 60 RP", 54.000, 2),
-            Product("ludo_41", "41K Hearts + 100 RP", 90.000, 1),
-        ],
-    ),
-    Category(
-        cid="itunes",
-        title="🍏 iTunes [USA] GIFTCARDS",
-        products=[
-            Product("it_5", "5$ iTunes US", 4.600, 217),
-            Product("it_10", "10$ iTunes US", 9.200, 124),
-            Product("it_20", "20$ iTunes US", 18.400, 21),
-            Product("it_25", "25$ iTunes US", 23.000, 13),
-            Product("it_50", "50$ iTunes US", 46.000, 9),
-            Product("it_100", "100$ iTunes US", 91.000, 31),
-            Product("it_200", "200$ iTunes US", 180.000, 0),
-        ],
-    ),
-    Category(
-        cid="ps",
-        title="🎮 PLAYSTATION [USA] GIFTCARDS",
-        products=[
-            Product("ps_10", "10$ PSN USA", 8.900, 0),
-            Product("ps_25", "25$ PSN USA", 22.000, 10),
-            Product("ps_50", "50$ PSN USA", 44.000, 0),
-            Product("ps_100", "100$ PSN USA", 88.000, 5),
-        ],
-    ),
-    Category(
-        cid="roblox",
-        title="🕹 ROBLOX [USA]",
-        products=[
-            Product("rbx_10", "Roblox 10$", 9.000, 65),
-            Product("rbx_25", "Roblox 25$", 22.500, 2),
-            Product("rbx_50", "Roblox 50$", 45.000, 1),
-        ],
-    ),
-]
-
-CAT_BY_ID: Dict[str, Category] = {c.cid: c for c in CATALOG}
-PROD_BY_ID: Dict[str, Product] = {p.pid: p for c in CATALOG for p in c.products}
-PROD_TO_CAT: Dict[str, str] = {p.pid: c.cid for c in CATALOG for p in c.products}
-
-# =========================
-# User State Keys
-# =========================
-UD_SELECTED_CAT = "selected_cat"
-UD_SELECTED_PROD = "selected_prod"
-UD_AWAITING_QTY = "awaiting_qty"
-
-
-# =========================
-# Helpers
-# =========================
-def money(x: float) -> str:
-    # 3 decimals like: 0.875$
-    return f"{x:.3f}{CURRENCY}"
-
-
-def kb_categories() -> InlineKeyboardMarkup:
-    rows = []
-    for c in CATALOG:
-        rows.append([InlineKeyboardButton(c.title, callback_data=f"cat:{c.cid}")])
+def prod_kb(cat):
+    rows=[]
+    for name,price,stock in CATALOG[cat]:
+        rows.append([InlineKeyboardButton(f"{name} | {price}$ | {stock}",callback_data=f"prod:{cat}:{name}")])
+    rows.append([InlineKeyboardButton("⬅️ رجوع",callback_data="home")])
     return InlineKeyboardMarkup(rows)
 
+def qty_kb(q):
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➖",callback_data="minus"),
+         InlineKeyboardButton(str(q),callback_data="noop"),
+         InlineKeyboardButton("➕",callback_data="plus")],
+        [InlineKeyboardButton("✅ تأكيد",callback_data="confirm")]
+    ])
 
-def kb_products(cat_id: str) -> InlineKeyboardMarkup:
-    c = CAT_BY_ID[cat_id]
-    rows = []
-    for p in c.products:
-        # مثل الصورة: "60 UC | 0.875$ | 4690"
-        label = f"{p.title} | {money(p.price)} | {p.stock}"
-        rows.append([InlineKeyboardButton(label, callback_data=f"prod:{p.pid}")])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back:cats")])
-    return InlineKeyboardMarkup(rows)
+# ===== START =====
+async def start(u,c):
+    cur.execute("INSERT OR IGNORE INTO users(id) VALUES(?)",(u.effective_user.id,))
+    db.commit()
+    await u.message.reply_text("🛒 GameVault PRO",reply_markup=menu)
 
+# ===== MENU =====
+async def text(u,c):
+    t=u.message.text
 
-def kb_qty_controls(cat_id: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{cat_id}")],
-            [InlineKeyboardButton("⬅️ Back", callback_data=f"back:prods:{cat_id}")],
-        ]
-    )
+    if t=="🛍 الأقسام":
+        await u.message.reply_text("اختر قسم:",reply_markup=cats_kb())
 
+    elif t=="💳 محفظتي":
+        bal=cur.execute("SELECT balance FROM users WHERE id=?",(u.effective_user.id,)).fetchone()[0]
+        await u.message.reply_text(f"رصيدك: {bal}$")
 
-async def edit_or_send(update: Update, text: str, reply_markup: Optional[InlineKeyboardMarkup] = None):
-    """
-    إذا كان عندنا callback -> نعدل نفس الرسالة (مثل الصور)
-    إذا رسالة عادية -> نرسل رسالة جديدة
-    """
-    if update.callback_query:
-        q = update.callback_query
-        await q.edit_message_text(text, reply_markup=reply_markup)
-    else:
-        await update.message.reply_text(text, reply_markup=reply_markup)
+    elif t=="➕ شحن":
+        await u.message.reply_text(f"ارسل USDT الى:\n{USDT_ADDRESS}\nثم ارسل TXID")
 
+    elif t=="📦 طلباتي":
+        rows=cur.execute("SELECT product,total,status FROM orders WHERE user_id=?",(u.effective_user.id,)).fetchall()
+        if not rows: return await u.message.reply_text("لا توجد طلبات")
+        await u.message.reply_text("\n".join([f"{p} | {t}$ | {s}"for p,t,s in rows]))
 
-# =========================
-# Pages
-# =========================
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.clear()
-    text = (
-        "🛒 CODES & Gift Cards\n\n"
-        "📦 Product Categories:\n"
-        "Choose a category below:"
-    )
-    await update.message.reply_text(text, reply_markup=kb_categories())
-
-
-async def show_products_page(update: Update, context: ContextTypes.DEFAULT_TYPE, cat_id: str):
-    c = CAT_BY_ID[cat_id]
-    context.user_data[UD_SELECTED_CAT] = cat_id
-    context.user_data[UD_SELECTED_PROD] = None
-    context.user_data[UD_AWAITING_QTY] = False
-
-    text = f"{c.title} - Choose a product:"
-    await edit_or_send(update, text, reply_markup=kb_products(cat_id))
-
-
-async def show_quantity_page(update: Update, context: ContextTypes.DEFAULT_TYPE, prod_id: str):
-    p = PROD_BY_ID[prod_id]
-    cat_id = PROD_TO_CAT[prod_id]
-    c = CAT_BY_ID[cat_id]
-
-    context.user_data[UD_SELECTED_CAT] = cat_id
-    context.user_data[UD_SELECTED_PROD] = prod_id
-    context.user_data[UD_AWAITING_QTY] = True
-
-    text = (
-        f"🛒 Your Order — Codes & Gift Cards ⚡\n\n"
-        f"📦 {c.title}\n"
-        f"🔹 Product: {p.title}\n"
-        f"💎 Price: {money(p.price)}\n"
-        f"📦 In Stock: {p.stock}\n\n"
-        f"🔻 Enter a quantity between 1 and {p.stock}:"
-    )
-    await edit_or_send(update, text, reply_markup=kb_qty_controls(cat_id))
-
-
-# =========================
-# Callbacks (Inline Buttons داخل المحادثة)
-# =========================
-async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
+# ===== CALLBACK =====
+async def cb(u,c):
+    q=u.callback_query
     await q.answer()
-    data = q.data or ""
+    d=q.data
 
-    # Category selected
-    if data.startswith("cat:"):
-        cat_id = data.split(":", 1)[1]
-        if cat_id not in CAT_BY_ID:
-            return await q.edit_message_text("❌ Category not found.")
-        return await show_products_page(update, context, cat_id)
+    if d.startswith("cat:"):
+        cat=d.split(":")[1]
+        await q.edit_message_text("اختر منتج:",reply_markup=prod_kb(cat))
 
-    # Product selected
-    if data.startswith("prod:"):
-        prod_id = data.split(":", 1)[1]
-        if prod_id not in PROD_BY_ID:
-            return await q.edit_message_text("❌ Product not found.")
+    elif d.startswith("prod:"):
+        _,cat,name=d.split(":")
+        for n,p,s in CATALOG[cat]:
+            if n==name:
+                c.user_data["order"]=[cat,n,p,s]
+        c.user_data["qty"]=1
+        await q.edit_message_text(f"{name}\nاختر الكمية:",reply_markup=qty_kb(1))
 
-        p = PROD_BY_ID[prod_id]
-        if p.stock <= 0:
-            # نفس الصفحة لكن نخبره أنه غير متوفر
-            cat_id = PROD_TO_CAT[prod_id]
-            return await q.edit_message_text(
-                f"❌ هذا المنتج غير متوفر حالياً.\n\nاختر منتجاً آخر:",
-                reply_markup=kb_products(cat_id),
-            )
+    elif d=="plus":
+        c.user_data["qty"]+=1
+        await q.edit_reply_markup(qty_kb(c.user_data["qty"]))
 
-        return await show_quantity_page(update, context, prod_id)
+    elif d=="minus":
+        c.user_data["qty"]=max(1,c.user_data["qty"]-1)
+        await q.edit_reply_markup(qty_kb(c.user_data["qty"]))
 
-    # Back to categories
-    if data == "back:cats":
-        context.user_data[UD_SELECTED_PROD] = None
-        context.user_data[UD_AWAITING_QTY] = False
-        text = (
-            "🛒 CODES & Gift Cards\n\n"
-            "📦 Product Categories:\n"
-            "Choose a category below:"
-        )
-        return await q.edit_message_text(text, reply_markup=kb_categories())
+    elif d=="confirm":
+        cat,name,price,stock=c.user_data["order"]
+        qty=c.user_data["qty"]
+        total=qty*price
 
-    # Back to products list
-    if data.startswith("back:prods:"):
-        cat_id = data.split(":", 2)[2]
-        if cat_id not in CAT_BY_ID:
-            return await q.edit_message_text("❌ Category not found.")
-        return await show_products_page(update, context, cat_id)
+        bal=cur.execute("SELECT balance FROM users WHERE id=?",(u.effective_user.id,)).fetchone()[0]
+        if bal<total:
+            return await q.edit_message_text("❌ رصيد غير كافي")
 
-    # Cancel order
-    if data.startswith("cancel:"):
-        cat_id = data.split(":", 1)[1]
-        context.user_data[UD_SELECTED_PROD] = None
-        context.user_data[UD_AWAITING_QTY] = False
-        return await q.edit_message_text(
-            "✅ تم إلغاء الطلب.\nاختر منتجاً آخر:",
-            reply_markup=kb_products(cat_id),
-        )
+        cur.execute("UPDATE users SET balance=balance-? WHERE id=?",(total,u.effective_user.id))
+        cur.execute("INSERT INTO orders(user_id,product,qty,total) VALUES(?,?,?,?)",(u.effective_user.id,name,qty,total))
+        db.commit()
 
+        await q.edit_message_text(f"✅ تم الطلب\n{name} x{qty}\n{total}$")
 
-# =========================
-# Quantity input (كتابة رقم)
-# =========================
-async def on_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or "").strip()
+        if ADMIN_ID:
+            await c.bot.send_message(ADMIN_ID,f"طلب جديد\n{name} x{qty}\n{total}$\nUser:{u.effective_user.id}")
 
-    # لو المستخدم ليس في وضع إدخال كمية، نرشده
-    if not context.user_data.get(UD_AWAITING_QTY):
-        if text.lower() in ("menu", "/start"):
-            return await start(update, context)
-        return await update.message.reply_text("اكتب /start لعرض الأقسام ✅")
+# ===== ADMIN =====
+async def approve(u,c):
+    if u.effective_user.id!=ADMIN_ID: return
+    user=int(c.args[0]);amount=float(c.args[1])
+    cur.execute("UPDATE users SET balance=balance+? WHERE id=?",(amount,user))
+    db.commit()
+    await u.message.reply_text("تم الشحن")
 
-    # ننتظر كمية
-    prod_id = context.user_data.get(UD_SELECTED_PROD)
-    if not prod_id or prod_id not in PROD_BY_ID:
-        context.user_data[UD_AWAITING_QTY] = False
-        return await update.message.reply_text("❌ حدث خطأ. اكتب /start من جديد.")
+async def deliver(u,c):
+    if u.effective_user.id!=ADMIN_ID: return
+    order=int(c.args[0])
+    cur.execute("UPDATE orders SET status='done' WHERE id=?",(order,))
+    db.commit()
+    await u.message.reply_text("تم التسليم")
 
-    p = PROD_BY_ID[prod_id]
-
-    # لازم رقم صحيح
-    try:
-        qty = int(text)
-    except ValueError:
-        return await update.message.reply_text(f"❌ اكتب رقم فقط بين 1 و {p.stock}.")
-
-    if qty < 1 or qty > p.stock:
-        return await update.message.reply_text(f"❌ الكمية لازم تكون بين 1 و {p.stock}.")
-
-    # مثال: “تأكيد الطلب” (هنا فقط Demo)
-    total = qty * p.price
-
-    # (اختياري) نقص المخزون في الذاكرة
-    p.stock -= qty
-
-    # نخرج من وضع إدخال الكمية
-    context.user_data[UD_AWAITING_QTY] = False
-    context.user_data[UD_SELECTED_PROD] = None
-
-    cat_id = PROD_TO_CAT[prod_id]
-    await update.message.reply_text(
-        f"✅ تم استلام طلبك!\n\n"
-        f"📦 المنتج: {p.title}\n"
-        f"🔢 الكمية: {qty}\n"
-        f"💰 الإجمالي: {money(total)}\n\n"
-        f"اختر منتجاً آخر:",
-        reply_markup=kb_products(cat_id),
-    )
-
-
-# =========================
-# Run
-# =========================
+# ===== RUN =====
 def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CallbackQueryHandler(on_callback))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, on_text))
-
+    app=ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start",start))
+    app.add_handler(CommandHandler("approve",approve))
+    app.add_handler(CommandHandler("deliver",deliver))
+    app.add_handler(CallbackQueryHandler(cb))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND,text))
     app.run_polling()
 
-
-if __name__ == "__main__":
-    main()
+main()
