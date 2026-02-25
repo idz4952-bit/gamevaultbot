@@ -445,6 +445,7 @@ def kb_support() -> InlineKeyboardMarkup:
 def kb_admin_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
+            [InlineKeyboardButton("📦 Check Stock", callback_data="admin:checkstock")],
             [InlineKeyboardButton("📋 List Products (PID)", callback_data="admin:listprod")],
             [InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat")],
             [InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod")],
