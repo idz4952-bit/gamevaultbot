@@ -31,7 +31,6 @@ from telegram.ext import (
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 DB_PATH = os.getenv("DB_PATH", "shop.db")
-
 CURRENCY = os.getenv("CURRENCY", "$")
 
 BINANCE_UID = os.getenv("BINANCE_UID", "181093359")
@@ -43,14 +42,14 @@ SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+213xxxxxxxxx")
 SUPPORT_GROUP = os.getenv("SUPPORT_GROUP", "@yourgroup")
 SUPPORT_CHANNEL = os.getenv("SUPPORT_CHANNEL", "@yourchannel")
 
-
+# =========================
+# Helpers
+# =========================
 def is_admin(uid: int) -> bool:
     return uid == ADMIN_ID
 
-
 def money(x: float) -> str:
     return f"{x:.3f} {CURRENCY}"
-
 
 def to_tme(x: str) -> str:
     x = (x or "").strip()
@@ -60,20 +59,24 @@ def to_tme(x: str) -> str:
         return f"https://t.me/{x[1:]}"
     return f"https://t.me/{x}"
 
-
-# =========================
-# SORT: صغير -> كبير (تلقائي)
-# =========================
 def extract_sort_value(title: str) -> float:
-    """
-    يستخرج أول رقم من اسم المنتج لترتيب (1,2,5,10,20) أو (60,325,660...) إلخ
-    """
-    t = title.replace(",", ".")
+    t = (title or "").replace(",", ".")
     nums = re.findall(r"\d+(?:\.\d+)?", t)
     if not nums:
         return 1e18
     return float(nums[0])
 
+def normalize_code(s: str) -> str:
+    # يمنع اختلافات شكلية (مسافات/تاب/سطر)
+    s = (s or "").strip()
+    s = re.sub(r"\s+", " ", s)
+    return s
+
+def md_escape(s: str) -> str:
+    # Escape for MarkdownV2
+    if s is None:
+        return ""
+    return re.sub(r"([_*\[\]()~`>#+\-=|{}.!\\])", r"\\\1", s)
 
 # =========================
 # DB
@@ -96,7 +99,6 @@ CREATE TABLE IF NOT EXISTS categories(
   title TEXT NOT NULL UNIQUE
 );
 
--- product_type: 'CODE' فقط (تسليم تلقائي)
 CREATE TABLE IF NOT EXISTS products(
   pid INTEGER PRIMARY KEY AUTOINCREMENT,
   cid INTEGER NOT NULL,
@@ -107,7 +109,6 @@ CREATE TABLE IF NOT EXISTS products(
   FOREIGN KEY(cid) REFERENCES categories(cid)
 );
 
--- مخزون الأكواد
 CREATE TABLE IF NOT EXISTS codes(
   code_id INTEGER PRIMARY KEY AUTOINCREMENT,
   pid INTEGER NOT NULL,
@@ -125,40 +126,43 @@ CREATE TABLE IF NOT EXISTS orders(
   product_title TEXT NOT NULL,
   qty INTEGER NOT NULL,
   total REAL NOT NULL,
-  status TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING/COMPLETED/CANCELLED
+  status TEXT NOT NULL DEFAULT 'PENDING',
   delivered_text TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- طلبات الشحن
 CREATE TABLE IF NOT EXISTS deposits(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
-  method TEXT NOT NULL,    -- BINANCE/BYBIT/TRC20/BEP20
+  method TEXT NOT NULL,
   note TEXT NOT NULL,
   txid TEXT,
   amount REAL,
-  status TEXT NOT NULL DEFAULT 'WAITING_PAYMENT', -- WAITING_PAYMENT/PAID/PENDING_REVIEW/APPROVED/REJECTED
+  status TEXT NOT NULL DEFAULT 'WAITING_PAYMENT',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- (اختياري) منع تكرار نفس الكود لنفس المنتج
+-- منع تكرار نفس الكود لنفس المنتج
 CREATE UNIQUE INDEX IF NOT EXISTS idx_codes_unique ON codes(pid, code_text);
 """
 )
 con.commit()
 
 # =========================
-# SEED: جميع الفئات والمنتجات
+# Seed / Delete removed categories
 # =========================
+# ✅ حذف الأقسام داخل الدوائر الحمراء (حسب الصورة)
+REMOVED_CATEGORIES = [
+    "🎲 YALLA LUDO",
+    "🕹 ROBLOX (USA)",
+    "🟦 STEAM (USA)",
+]
+
 DEFAULT_CATEGORIES = [
     "🍎 ITUNES GIFTCARD (USA)",
     "🪂 PUBG MOBILE UC VOUCHERS",
     "💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)",
-    "🎲 YALLA LUDO",
     "🎮 PLAYSTATION USA GIFTCARDS",
-    "🕹 ROBLOX (USA)",
-    "🟦 STEAM (USA)",
 ]
 
 DEFAULT_PRODUCTS = [
@@ -183,31 +187,34 @@ DEFAULT_PRODUCTS = [
     ("🍎 ITUNES GIFTCARD (USA)", "20$ iTunes US", 18.400),
     ("🍎 ITUNES GIFTCARD (USA)", "25$ iTunes US", 23.000),
     ("🍎 ITUNES GIFTCARD (USA)", "50$ iTunes US", 46.000),
+    # ✅ المطلوب: 100$
+    ("🍎 ITUNES GIFTCARD (USA)", "100$ iTunes US", 92.000),
 
     # PlayStation
     ("🎮 PLAYSTATION USA GIFTCARDS", "10$ PSN USA", 8.900),
     ("🎮 PLAYSTATION USA GIFTCARDS", "25$ PSN USA", 22.000),
     ("🎮 PLAYSTATION USA GIFTCARDS", "50$ PSN USA", 44.000),
     ("🎮 PLAYSTATION USA GIFTCARDS", "100$ PSN USA", 88.000),
-
-    # Roblox
-    ("🕹 ROBLOX (USA)", "10$ Roblox", 9.000),
-    ("🕹 ROBLOX (USA)", "25$ Roblox", 22.500),
-    ("🕹 ROBLOX (USA)", "50$ Roblox", 45.000),
-
-    # Steam
-    ("🟦 STEAM (USA)", "10$ Steam", 9.500),
-    ("🟦 STEAM (USA)", "20$ Steam", 19.000),
-    ("🟦 STEAM (USA)", "50$ Steam", 47.500),
-
-    # Ludo
-    ("🎲 YALLA LUDO", "3.7K Hearts + 10 RP", 9.000),
-    ("🎲 YALLA LUDO", "7.5K Hearts + 20 RP", 18.000),
-    ("🎲 YALLA LUDO", "24K Hearts + 60 RP", 54.000),
 ]
 
+def purge_removed():
+    # حذف القسم + منتجاته + أكواده
+    for cat in REMOVED_CATEGORIES:
+        cur.execute("SELECT cid FROM categories WHERE title=?", (cat,))
+        r = cur.fetchone()
+        if not r:
+            continue
+        cid = int(r[0])
+        cur.execute("SELECT pid FROM products WHERE cid=?", (cid,))
+        pids = [int(x[0]) for x in cur.fetchall()]
+        for pid in pids:
+            cur.execute("DELETE FROM codes WHERE pid=?", (pid,))
+        cur.execute("DELETE FROM products WHERE cid=?", (cid,))
+        cur.execute("DELETE FROM categories WHERE cid=?", (cid,))
+    con.commit()
 
 def seed_defaults():
+    purge_removed()
     for cat in DEFAULT_CATEGORIES:
         cur.execute("INSERT OR IGNORE INTO categories(title) VALUES(?)", (cat,))
     con.commit()
@@ -226,7 +233,6 @@ def seed_defaults():
             (cid, title, float(price)),
         )
     con.commit()
-
 
 seed_defaults()
 
@@ -258,7 +264,6 @@ UD_ADMIN_MODE = "admin_mode"
 UD_ORD_RNG = "orders_rng"
 UD_MANUAL_MODE = "manual_mode"
 
-
 # =========================
 # User helpers
 # =========================
@@ -273,35 +278,47 @@ def upsert_user(u):
     )
     con.commit()
 
+def ensure_user(uid: int):
+    cur.execute("INSERT OR IGNORE INTO users(user_id, username, first_name, balance) VALUES(?,?,?,0)",
+                (uid, "", ""))
+    con.commit()
 
 def get_balance(uid: int) -> float:
     cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
     row = cur.fetchone()
     return float(row[0]) if row else 0.0
 
-
 def add_balance(uid: int, amount: float):
+    ensure_user(uid)
     cur.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (amount, uid))
     con.commit()
 
+def charge_balance(uid: int, amount: float) -> bool:
+    ensure_user(uid)
+    bal = get_balance(uid)
+    if bal + 1e-9 < amount:
+        return False
+    cur.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (amount, uid))
+    con.commit()
+    return True
 
 # =========================
-# Delivery: <=200 رسالة، >200 ملف
+# Delivery
 # =========================
 MAX_CODES_IN_MESSAGE = 200
-TELEGRAM_TEXT_LIMIT = 3800
-
+TELEGRAM_TEXT_LIMIT = 3600
 
 async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, order_id: int, codes: List[str]):
-    codes = [c.strip() for c in codes if c and c.strip()]
+    codes = [normalize_code(c) for c in codes if c and normalize_code(c)]
     count = len(codes)
-
-    header = f"✅ Order #{order_id} COMPLETED\n🎁 Codes count: {count}\n\n"
 
     if count == 0:
         await context.bot.send_message(chat_id=chat_id, text=f"✅ Order #{order_id} COMPLETED\n(No codes)")
         return
 
+    header = f"✅ Order #{order_id} COMPLETED\n🎁 Codes count: {count}\n\n"
+
+    # إذا كثيرة -> ملف
     if count > MAX_CODES_IN_MESSAGE:
         content = "\n".join(codes)
         bio = io.BytesIO(content.encode("utf-8"))
@@ -310,26 +327,24 @@ async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, 
         await context.bot.send_document(chat_id=chat_id, document=bio)
         return
 
+    # ✅ Code Block -> يظهر زر Copy في تيليجرام غالباً
     body = "\n".join(codes)
-    text = header + body
-    if len(text) <= TELEGRAM_TEXT_LIMIT:
-        await context.bot.send_message(chat_id=chat_id, text=text)
+    msg = header + "```text\n" + body + "\n```"
+    if len(msg) <= TELEGRAM_TEXT_LIMIT:
+        await context.bot.send_message(chat_id=chat_id, text=msg, parse_mode=ParseMode.MARKDOWN_V2)
         return
 
-    await context.bot.send_message(chat_id=chat_id, text=header + "🎁 Codes (part 1):")
+    # إذا طولت: تقسيم
+    await context.bot.send_message(chat_id=chat_id, text=md_escape(header) + md_escape("```text\n") , parse_mode=ParseMode.MARKDOWN_V2)
     chunk = ""
-    part = 1
     for c in codes:
         line = c + "\n"
-        if len(chunk) + len(line) > TELEGRAM_TEXT_LIMIT:
-            await context.bot.send_message(chat_id=chat_id, text=chunk.rstrip())
-            part += 1
-            chunk = f"🎁 Codes (part {part}):\n" + line
-        else:
-            chunk += line
+        if len(chunk) + len(line) > 3000:
+            await context.bot.send_message(chat_id=chat_id, text="```text\n" + chunk + "```", parse_mode=ParseMode.MARKDOWN_V2)
+            chunk = ""
+        chunk += line
     if chunk.strip():
-        await context.bot.send_message(chat_id=chat_id, text=chunk.rstrip())
-
+        await context.bot.send_message(chat_id=chat_id, text="```text\n" + chunk.strip() + "\n```", parse_mode=ParseMode.MARKDOWN_V2)
 
 # =========================
 # Keyboards
@@ -350,11 +365,9 @@ def kb_categories() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin:panel")])
     return InlineKeyboardMarkup(rows)
 
-
 def product_stock(pid: int) -> int:
     cur.execute("SELECT COUNT(*) FROM codes WHERE pid=? AND used=0", (pid,))
     return int(cur.fetchone()[0])
-
 
 def kb_products(cid: int) -> InlineKeyboardMarkup:
     cur.execute("SELECT pid,title,price FROM products WHERE cid=? AND active=1", (cid,))
@@ -369,7 +382,6 @@ def kb_products(cid: int) -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back:cats")])
     return InlineKeyboardMarkup(rows)
 
-
 def kb_product_view(pid: int, cid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -377,7 +389,6 @@ def kb_product_view(pid: int, cid: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("⬅️ Back", callback_data=f"back:prods:{cid}")],
         ]
     )
-
 
 def kb_balance_methods() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -393,10 +404,11 @@ def kb_balance_methods() -> InlineKeyboardMarkup:
         ]
     )
 
-
 def kb_have_paid(dep_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("✅ I Have Paid", callback_data=f"paid:{dep_id}")]])
 
+def kb_topup_now() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔋 Top Up Now", callback_data="goto:balance")]])
 
 def kb_orders_filters(page: int, total_pages: int) -> InlineKeyboardMarkup:
     nav_row = []
@@ -417,7 +429,6 @@ def kb_orders_filters(page: int, total_pages: int) -> InlineKeyboardMarkup:
         ]
     )
 
-
 def kb_support() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -425,7 +436,6 @@ def kb_support() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("📣 Visit Support Channel", url=to_tme(SUPPORT_CHANNEL))],
         ]
     )
-
 
 def kb_admin_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -440,13 +450,10 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("💰 Approve Deposit", callback_data="admin:approvedep")],
             [InlineKeyboardButton("🚫 Reject Deposit", callback_data="admin:rejectdep")],
             [InlineKeyboardButton("➕ Add Balance to User", callback_data="admin:addbal")],
+            # ✅ جديد: سحب رصيد وتحويله للأدمن
+            [InlineKeyboardButton("➖ Take Balance (to Admin)", callback_data="admin:takebal")],
         ]
     )
-
-
-def kb_topup_now() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("🔋 Top Up Now", callback_data="goto:balance")]])
-
 
 # =========================
 # Pages
@@ -455,14 +462,12 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
     await update.message.reply_text("✅ Bot is online!", reply_markup=REPLY_MENU)
 
-
 async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🛒 Here are our product categories!\nSelect a category to explore our offerings"
     if update.message:
         await update.message.reply_text(text, reply_markup=kb_categories())
     else:
         await update.callback_query.edit_message_text(text, reply_markup=kb_categories())
-
 
 async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
@@ -479,7 +484,6 @@ async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_balance_methods())
     else:
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_balance_methods())
-
 
 def _orders_query(uid: int, rng: str) -> List[Tuple]:
     if rng == "all":
@@ -502,7 +506,6 @@ def _orders_query(uid: int, rng: str) -> List[Tuple]:
     )
     return cur.fetchall()
 
-
 def _format_orders_page(rows: List[Tuple], page: int, page_size: int = 4) -> Tuple[str, int]:
     total = len(rows)
     total_pages = max(1, (total + page_size - 1) // page_size)
@@ -524,7 +527,6 @@ def _format_orders_page(rows: List[Tuple], page: int, page_size: int = 4) -> Tup
     footer = f"{page+1}/{total_pages}"
     return ("\n".join(lines) + f"\n{footer}", total_pages)
 
-
 async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, rng: str = "all", page: int = 0):
     uid = update.effective_user.id
     context.user_data[UD_ORD_RNG] = rng
@@ -536,7 +538,6 @@ async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, rng: s
         await update.message.reply_text(text, reply_markup=kb_orders_filters(page, total_pages))
     else:
         await update.callback_query.edit_message_text(text, reply_markup=kb_orders_filters(page, total_pages))
-
 
 async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
@@ -550,12 +551,11 @@ async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_support())
 
-
 # =========================
 # Smart tips
 # =========================
 def smart_reply(msg: str) -> Optional[str]:
-    m = msg.lower()
+    m = (msg or "").lower()
     if any(x in m for x in ["price", "سعر", "كم", "ثمن"]):
         return "💡 الأسعار تظهر داخل Our Products → اختر القسم."
     if any(x in m for x in ["balance", "رصيد", "wallet", "محفظة"]):
@@ -566,7 +566,6 @@ def smart_reply(msg: str) -> Optional[str]:
         return "💡 من My Balance اختر طريقة الشحن ثم اضغط ✅ I Have Paid وأرسل Amount | TXID."
     return None
 
-
 # =========================
 # Router (Reply Menu)
 # =========================
@@ -576,13 +575,10 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if t == "🛒 Our Products":
         return await show_categories(update, context)
-
     if t == "💰 My Balance":
         return await show_balance(update, context)
-
     if t == "📦 My Orders":
         return await show_orders(update, context, rng=context.user_data.get(UD_ORD_RNG) or "all", page=0)
-
     if t == "☎️ Contact Support":
         return await show_support(update, context)
 
@@ -607,13 +603,11 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("Use the menu 👇", reply_markup=REPLY_MENU)
 
-
 # =========================
 # Quantity input
 # =========================
 async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
-
     if txt.lower() in ("/cancel", "cancel"):
         context.user_data.pop(UD_PID, None)
         context.user_data.pop(UD_CID, None)
@@ -659,9 +653,8 @@ async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
-
 # =========================
-# Topup details input: Amount | TXID
+# Topup details input: amount | txid
 # =========================
 async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
@@ -695,8 +688,7 @@ async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ This deposit is already processed.")
         return ConversationHandler.END
 
-    clean_txid = txid.replace("\n", " ").strip()[:1500]
-
+    clean_txid = normalize_code(txid)[:1500]
     cur.execute(
         "UPDATE deposits SET txid=?, amount=?, status='PENDING_REVIEW' WHERE id=?",
         (clean_txid, amount, dep_id),
@@ -714,7 +706,6 @@ async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"Approve: /approvedep {dep_id}\nReject: /rejectdep {dep_id}",
     )
     return ConversationHandler.END
-
 
 # =========================
 # Callback handler
@@ -764,14 +755,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         prompts = {
             "addcat": 'Send category title:\nExample: 🪂 PUBG MOBILE UC VOUCHERS',
-            "addprod": 'Send product:\nFormat: "Category Title" | "Product Title" | price\nExample:\n"🍎 ITUNES GIFTCARD (USA)" | "10$ iTunes US" | 9.2',
+            "addprod": 'Send product:\nFormat: "Category Title" | "Product Title" | price\nExample:\n"🍎 ITUNES GIFTCARD (USA)" | "100$ iTunes US" | 92',
             "addcodes": 'Send codes:\nFormat: pid | code1\\ncode2\\n...\nExample:\n12 | ABCD-1234\nEFGH-5678',
             "setprice": 'Send: pid | new_price\nExample: 12 | 9.5',
             "toggle": 'Send: pid (toggle ON/OFF)\nExample: 12',
             "cancelorder": 'Send: order_id (refund)\nExample: 55',
-            "approvedep": 'Send: deposit_id\nExample: 10',
-            "rejectdep": 'Send: deposit_id\nExample: 10',
+            "approvedep": 'Send: deposit_id\nExample: 2',
+            "rejectdep": 'Send: deposit_id\nExample: 2',
             "addbal": 'Send: user_id | amount\nExample: 1997968014 | 5',
+            "takebal": 'Send: user_id | amount\n(يتم سحب الرصيد من العميل وإضافته للأدمن)\nExample: 1997968014 | 5',
         }
         await q.edit_message_text(prompts.get(mode, "Send input now..."))
         return ST_ADMIN_INPUT
@@ -798,13 +790,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text("❌ Product not found.")
         title, price, cid = row
         stock = product_stock(pid)
-
         text = (
             f"🎁 {title}\n\n"
             f"- ID: {pid}\n"
-            f"- Description: N/A\n"
             f"- Price: {float(price):.3f} {CURRENCY}\n"
-            f"- In Stock: {stock} items available"
+            f"- In Stock: {stock}"
         )
         return await q.edit_message_text(text, reply_markup=kb_product_view(pid, cid))
 
@@ -823,50 +813,41 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data[UD_PID] = pid
         context.user_data[UD_CID] = cid
         context.user_data[UD_QTY_MAX] = stock
-
         await q.edit_message_text(
             f"You are purchasing {title}\n\n📝 Enter a quantity between 1 and {stock}:\n\n❌ If you want to cancel the process, send /cancel"
         )
         return ST_QTY
 
-    # confirm purchase (transaction safe)
+    # confirm purchase (with balance check + topup button)
     if data.startswith("confirm:"):
         pid = int(data.split(":", 1)[1])
         qty = int(context.user_data.get("qty_value", 0))
         if qty <= 0:
             return await q.edit_message_text("❌ Quantity expired. Buy again.")
 
-        uid = update.effective_user.id
+        cur.execute("SELECT title, price FROM products WHERE pid=? AND active=1", (pid,))
+        row = cur.fetchone()
+        if not row:
+            return await q.edit_message_text("❌ Product not found.")
+        title, price = row
+        total = float(price) * qty
 
+        uid = update.effective_user.id
+        bal = get_balance(uid)
+        if bal + 1e-9 < total:
+            missing = total - bal
+            return await q.edit_message_text(
+                f"❌ Insufficient balance.\n\n"
+                f"Your balance: {bal:.3f} {CURRENCY}\n"
+                f"Required: {total:.3f} {CURRENCY}\n"
+                f"Missing: {missing:.3f} {CURRENCY}\n\n"
+                f"Click below to top up 👇",
+                reply_markup=kb_topup_now(),
+            )
+
+        # reserve codes
         try:
             con.execute("BEGIN IMMEDIATE")
-
-            # product check
-            cur.execute("SELECT title, price FROM products WHERE pid=? AND active=1", (pid,))
-            prow = cur.fetchone()
-            if not prow:
-                con.execute("ROLLBACK")
-                return await q.edit_message_text("❌ Product not found.")
-            title, price = prow
-            total = float(price) * qty
-
-            # balance check (inside txn)
-            cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
-            brow = cur.fetchone()
-            bal = float(brow[0]) if brow else 0.0
-            if bal + 1e-9 < total:
-                con.execute("ROLLBACK")
-                missing = total - bal
-                return await q.edit_message_text(
-                    f"❌ Insufficient balance.\n\n"
-                    f"Your balance: {bal:.3f} {CURRENCY}\n"
-                    f"Required: {total:.3f} {CURRENCY}\n"
-                    f"Missing: {missing:.3f} {CURRENCY}\n\n"
-                    f"Click below to top up 👇",
-                    reply_markup=kb_topup_now(),
-                )
-
-            # pick codes
             cur.execute("SELECT code_id, code_text FROM codes WHERE pid=? AND used=0 LIMIT ?", (pid, qty))
             picked = cur.fetchall()
             if len(picked) < qty:
@@ -880,7 +861,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             oid = cur.lastrowid
 
-            # mark codes used (avoid race)
             for code_id, _ in picked:
                 cur.execute(
                     "UPDATE codes SET used=1, used_at=datetime('now'), order_id=? WHERE code_id=? AND used=0",
@@ -890,15 +870,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     con.execute("ROLLBACK")
                     return await q.edit_message_text("❌ Stock conflict. Try again.")
 
-            # deduct balance
             cur.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (total, uid))
-
-            codes_list = [c for _, c in picked]
+            codes_list = [normalize_code(c) for _, c in picked]
             delivered_text = "\n".join(codes_list)
             cur.execute("UPDATE orders SET status='COMPLETED', delivered_text=? WHERE id=?", (delivered_text, oid))
 
             con.commit()
-
         except Exception as e:
             try:
                 con.execute("ROLLBACK")
@@ -906,9 +883,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 pass
             return await q.edit_message_text(f"❌ Error: {e}")
 
-        await q.edit_message_text(
-            f"✅ Order created!\nOrder ID: {oid}\nTotal: {total:.3f} {CURRENCY}\nDelivering codes..."
-        )
+        await q.edit_message_text(f"✅ Order created!\nOrder ID: {oid}\nTotal: {total:.3f} {CURRENCY}\nDelivering codes...")
         await send_codes_delivery(chat_id=uid, context=context, order_id=oid, codes=codes_list)
 
         await context.bot.send_message(
@@ -941,21 +916,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         con.commit()
 
         if method == "BINANCE":
-            dest_title = "UID"
-            dest_value = BINANCE_UID
-            extra = "Make sure you are sending only USDT."
+            dest_title, dest_value, extra = "UID", BINANCE_UID, "Make sure you are sending only USDT."
         elif method == "BYBIT":
-            dest_title = "UID"
-            dest_value = BYBIT_UID
-            extra = "Make sure you are sending only USDT."
+            dest_title, dest_value, extra = "UID", BYBIT_UID, "Make sure you are sending only USDT."
         elif method == "TRC20":
-            dest_title = "Address"
-            dest_value = USDT_TRC20
-            extra = "Network: TRC20 only."
+            dest_title, dest_value, extra = "Address", USDT_TRC20, "Network: TRC20 only."
         else:
-            dest_title = "Address"
-            dest_value = USDT_BEP20
-            extra = "Network: BEP20 only."
+            dest_title, dest_value, extra = "Address", USDT_BEP20, "Network: BEP20 only."
 
         text = (
             f"🔑 {method} Payment\n\n"
@@ -978,7 +945,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_TOPUP_DETAILS
 
-
 # =========================
 # Admin input handler
 # =========================
@@ -999,7 +965,7 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode == "addprod":
             m = re.match(r'^"(.+?)"\s*\|\s*"(.+?)"\s*\|\s*([\d.]+)\s*$', text)
             if not m:
-                await update.message.reply_text('❌ Format invalid.\nExample:\n"CAT" | "TITLE" | 9.2')
+                await update.message.reply_text('❌ Format invalid.\nExample:\n"CAT" | "TITLE" | 92')
                 return ConversationHandler.END
             cat_title, prod_title, price_s = m.groups()
             cur.execute("SELECT cid FROM categories WHERE title=?", (cat_title,))
@@ -1022,22 +988,23 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return ConversationHandler.END
             pid_s, codes_blob = [x.strip() for x in text.split("|", 1)]
             pid = int(pid_s)
-            codes = [c.strip() for c in codes_blob.splitlines() if c.strip()]
+
+            codes = [normalize_code(c) for c in codes_blob.splitlines() if normalize_code(c)]
             if not codes:
                 await update.message.reply_text("❌ No codes.")
                 return ConversationHandler.END
 
-            added = 0
-            skipped = 0
+            added, skipped = 0, 0
             for ctext in codes:
                 try:
                     cur.execute("INSERT INTO codes(pid,code_text,used) VALUES(?,?,0)", (pid, ctext))
                     added += 1
                 except sqlite3.IntegrityError:
+                    # ✅ تجاهل المكرر بدون “إزعاج”
                     skipped += 1
 
             con.commit()
-            await update.message.reply_text(f"✅ Added {added} codes to PID {pid}. Skipped duplicates: {skipped}")
+            await update.message.reply_text(f"✅ Added {added} codes to PID {pid}. (duplicates skipped: {skipped})")
             return ConversationHandler.END
 
         if mode == "setprice":
@@ -1135,13 +1102,39 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await context.bot.send_message(user_id, f"✅ Admin added balance: +{money(amount)}")
             return ConversationHandler.END
 
+        # ✅ جديد: سحب رصيد من عميل -> يذهب لرصيد الأدمن
+        if mode == "takebal":
+            m = re.match(r"^(\d+)\s*\|\s*([\d.]+)$", text)
+            if not m:
+                await update.message.reply_text("❌ Format: user_id | amount\nExample: 1997968014 | 5")
+                return ConversationHandler.END
+            user_id, amount = int(m.group(1)), float(m.group(2))
+            if amount <= 0:
+                await update.message.reply_text("❌ Amount must be > 0")
+                return ConversationHandler.END
+
+            ensure_user(user_id)
+            ensure_user(ADMIN_ID)
+
+            bal = get_balance(user_id)
+            if bal + 1e-9 < amount:
+                await update.message.reply_text(f"❌ User balance is not enough.\nUser balance: {bal:.3f} {CURRENCY}")
+                return ConversationHandler.END
+
+            cur.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (amount, user_id))
+            cur.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (amount, ADMIN_ID))
+            con.commit()
+
+            await update.message.reply_text(f"✅ Taken {money(amount)} from {user_id} -> added to Admin.")
+            await context.bot.send_message(user_id, f"⚠️ Admin deducted: -{money(amount)}")
+            return ConversationHandler.END
+
         await update.message.reply_text("✅ Done.")
         return ConversationHandler.END
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
         return ConversationHandler.END
-
 
 # =========================
 # Admin commands
@@ -1151,34 +1144,33 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ Not allowed.")
     await update.message.reply_text("👑 Admin Panel", reply_markup=kb_admin_panel())
 
-
-# ✅ FIX: parse id from message text (works even if context.args is empty)
+# ✅ FIX: commands parse id from message text (always works)
 async def approvedep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    try:
-        dep_id = int(update.message.text.split()[1])
-    except Exception:
+    raw = (update.message.text or "").strip()
+    m = re.search(r"^/approvedep(?:@\w+)?\s+(\d+)\s*$", raw)
+    if not m:
         return await update.message.reply_text("Usage: /approvedep 2")
+    dep_id = int(m.group(1))
     context.user_data[UD_ADMIN_MODE] = "approvedep"
     update.message.text = str(dep_id)
     return await admin_input(update, context)
 
-
 async def rejectdep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    try:
-        dep_id = int(update.message.text.split()[1])
-    except Exception:
+    raw = (update.message.text or "").strip()
+    m = re.search(r"^/rejectdep(?:@\w+)?\s+(\d+)\s*$", raw)
+    if not m:
         return await update.message.reply_text("Usage: /rejectdep 2")
+    dep_id = int(m.group(1))
     context.user_data[UD_ADMIN_MODE] = "rejectdep"
     update.message.text = str(dep_id)
     return await admin_input(update, context)
 
-
 # =========================
-# Main
+# Build / Main
 # =========================
 def build_app():
     app = ApplicationBuilder().token(TOKEN).build()
@@ -1199,20 +1191,15 @@ def build_app():
     app.add_handler(CommandHandler("approvedep", approvedep_cmd))
     app.add_handler(CommandHandler("rejectdep", rejectdep_cmd))
 
-    # ✅ هنا فقط
+    # ✅ IMPORTANT: conv قبل menu_router حتى لا يسرق الرسائل
     app.add_handler(conv)
 
-    app.add_handler(
-        MessageHandler(
-            filters.TEXT & ~filters.COMMAND,
-            menu_router
-        )
-    )
+    # ✅ آخر شيء: رسائل القائمة
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router))
 
     return app
 
 def main():
-    # تحقق env وقت التشغيل
     if not TOKEN:
         raise RuntimeError("TOKEN env var is missing")
     if ADMIN_ID == 0:
@@ -1220,7 +1207,6 @@ def main():
 
     app = build_app()
     app.run_polling(allowed_updates=Update.ALL_TYPES)
-
 
 if __name__ == "__main__":
     main()
