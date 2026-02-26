@@ -69,9 +69,6 @@ def to_tme(x: str) -> str:
 # SORT: صغير -> كبير (تلقائي)
 # =========================
 def extract_sort_value(title: str) -> float:
-    """
-    يستخرج أول رقم من اسم المنتج لترتيب (1,2,5,10,20) أو (60,325,660...) إلخ
-    """
     t = title.replace(",", ".")
     nums = re.findall(r"\d+(?:\.\d+)?", t)
     if not nums:
@@ -145,14 +142,16 @@ CREATE TABLE IF NOT EXISTS deposits(
   status TEXT NOT NULL DEFAULT 'WAITING_PAYMENT', -- WAITING_PAYMENT/PAID/PENDING_REVIEW/APPROVED/REJECTED
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+-- ✅ منع تكرار نفس الكود لنفس المنتج
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codes_unique ON codes(pid, code_text);
 """
 )
 con.commit()
 
 
 # =========================
-# SEED: جميع الفئات (كما طلبت)
-# المنتجات كلها CODE
+# SEED
 # =========================
 DEFAULT_CATEGORIES = [
     "🍎 ITUNES GIFTCARD (USA)",
@@ -165,14 +164,12 @@ DEFAULT_CATEGORIES = [
 ]
 
 DEFAULT_PRODUCTS = [
-    # Free Fire (مرتبة)
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "1 USD 💎 PINS 100+10", 0.920),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "2 USD 💎 PINS 210+21", 1.840),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "5 USD 💎 PINS 530+53", 4.600),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "10 USD 💎 PINS 1080+108", 9.200),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "20 USD 💎 PINS 2200+220", 18.400),
 
-    # PUBG (مرتبة)
     ("🪂 PUBG MOBILE UC VOUCHERS", "60 UC", 0.875),
     ("🪂 PUBG MOBILE UC VOUCHERS", "325 UC", 4.375),
     ("🪂 PUBG MOBILE UC VOUCHERS", "660 UC", 8.750),
@@ -180,30 +177,25 @@ DEFAULT_PRODUCTS = [
     ("🪂 PUBG MOBILE UC VOUCHERS", "3850 UC", 44.000),
     ("🪂 PUBG MOBILE UC VOUCHERS", "8100 UC", 88.000),
 
-    # iTunes
     ("🍎 ITUNES GIFTCARD (USA)", "5$ iTunes US", 4.600),
     ("🍎 ITUNES GIFTCARD (USA)", "10$ iTunes US", 9.200),
     ("🍎 ITUNES GIFTCARD (USA)", "20$ iTunes US", 18.400),
     ("🍎 ITUNES GIFTCARD (USA)", "25$ iTunes US", 23.000),
     ("🍎 ITUNES GIFTCARD (USA)", "50$ iTunes US", 46.000),
 
-    # PlayStation
     ("🎮 PLAYSTATION USA GIFTCARDS", "10$ PSN USA", 8.900),
     ("🎮 PLAYSTATION USA GIFTCARDS", "25$ PSN USA", 22.000),
     ("🎮 PLAYSTATION USA GIFTCARDS", "50$ PSN USA", 44.000),
     ("🎮 PLAYSTATION USA GIFTCARDS", "100$ PSN USA", 88.000),
 
-    # Roblox
     ("🕹 ROBLOX (USA)", "10$ Roblox", 9.000),
     ("🕹 ROBLOX (USA)", "25$ Roblox", 22.500),
     ("🕹 ROBLOX (USA)", "50$ Roblox", 45.000),
 
-    # Steam
     ("🟦 STEAM (USA)", "10$ Steam", 9.500),
     ("🟦 STEAM (USA)", "20$ Steam", 19.000),
     ("🟦 STEAM (USA)", "50$ Steam", 47.500),
 
-    # Ludo
     ("🎲 YALLA LUDO", "3.7K Hearts + 10 RP", 9.000),
     ("🎲 YALLA LUDO", "7.5K Hearts + 20 RP", 18.000),
     ("🎲 YALLA LUDO", "24K Hearts + 60 RP", 54.000),
@@ -234,7 +226,7 @@ def seed_defaults():
 seed_defaults()
 
 # =========================
-# Reply Menu (مثل الصور)
+# Reply Menu
 # =========================
 REPLY_MENU = ReplyKeyboardMarkup(
     [
@@ -288,15 +280,6 @@ def add_balance(uid: int, amount: float):
     con.commit()
 
 
-def charge_balance(uid: int, amount: float) -> bool:
-    bal = get_balance(uid)
-    if bal + 1e-9 < amount:
-        return False
-    cur.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (amount, uid))
-    con.commit()
-    return True
-
-
 # =========================
 # Delivery: <=200 رسالة، >200 ملف
 # =========================
@@ -328,7 +311,6 @@ async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, 
         await context.bot.send_message(chat_id=chat_id, text=text)
         return
 
-    # split long message
     await context.bot.send_message(chat_id=chat_id, text=header + "🎁 Codes (part 1):")
     chunk = ""
     part = 1
@@ -408,9 +390,7 @@ def kb_balance_methods() -> InlineKeyboardMarkup:
 
 
 def kb_have_paid(dep_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✅ I Have Paid", callback_data=f"paid:{dep_id}")]]
-    )
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ I Have Paid", callback_data=f"paid:{dep_id}")]])
 
 
 def kb_orders_filters(page: int, total_pages: int) -> InlineKeyboardMarkup:
@@ -563,7 +543,7 @@ async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Smart tips (لمسة ذكاء)
+# Smart tips
 # =========================
 def smart_reply(msg: str) -> Optional[str]:
     m = msg.lower()
@@ -579,7 +559,7 @@ def smart_reply(msg: str) -> Optional[str]:
 
 
 # =========================
-# Router (Reply Menu)
+# Router
 # =========================
 async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
@@ -604,7 +584,6 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=REPLY_MENU,
         )
 
-    # manual message forward
     if context.user_data.get(UD_MANUAL_MODE):
         context.user_data[UD_MANUAL_MODE] = False
         uid = update.effective_user.id
@@ -621,7 +600,7 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Quantity input (مثل الصورة + /cancel)
+# Quantity input
 # =========================
 async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
@@ -649,7 +628,6 @@ async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if qty < 1 or qty > max_qty:
         return await update.message.reply_text(f"❌ Enter a quantity between 1 and {max_qty}:")
 
-    # confirm page (inline)
     cur.execute("SELECT title, price FROM products WHERE pid=? AND active=1", (pid,))
     row = cur.fetchone()
     if not row:
@@ -689,7 +667,6 @@ async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Session expired. Open My Balance again.")
         return ConversationHandler.END
 
-    # format: amount | txid
     if "|" not in txt:
         return await update.message.reply_text("❌ Format: amount | txid\nExample: 10 | 2E38F3...")
 
@@ -709,9 +686,11 @@ async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ This deposit is already processed.")
         return ConversationHandler.END
 
+    clean_txid = txid.replace("\n", " ").strip()[:1500]
+
     cur.execute(
         "UPDATE deposits SET txid=?, amount=?, status='PENDING_REVIEW' WHERE id=?",
-        (txid[:1500], amount, dep_id),
+        (clean_txid, amount, dep_id),
     )
     con.commit()
 
@@ -722,7 +701,7 @@ async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     await context.bot.send_message(
         ADMIN_ID,
-        f"💰 DEPOSIT REVIEW\nDeposit ID: {dep_id}\nUser: {uid}\nAmount: {amount}\nTXID:\n{txid}\n\nApprove: /approvedep {dep_id}\nReject: /rejectdep {dep_id}",
+        f"💰 DEPOSIT REVIEW\nDeposit ID: {dep_id}\nUser: {uid}\nAmount: {amount}\nTXID:\n{clean_txid}\n\nApprove: /approvedep {dep_id}\nReject: /rejectdep {dep_id}",
     )
     return ConversationHandler.END
 
@@ -761,8 +740,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows = cur.fetchall()
             if not rows:
                 return await q.edit_message_text("No products.")
-            # split if too long
-            lines = [f"PID {pid} | {cat} | {title} | {price}$ | {'ON' if act else 'OFF'}" for pid, cat, title, price, act in rows]
+            lines = [
+                f"PID {pid} | {cat} | {title} | {float(price):.3f}{CURRENCY} | {'ON' if act else 'OFF'}"
+                for pid, cat, title, price, act in rows
+            ]
             text = "\n".join(lines)
             if len(text) > 3800:
                 text = text[:3800] + "\n..."
@@ -814,7 +795,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return await q.edit_message_text(text, reply_markup=kb_product_view(pid, cid))
 
-    # buy -> ask quantity (مثل الصورة)
+    # buy -> ask quantity
     if data.startswith("buy:"):
         pid = int(data.split(":", 1)[1])
         cur.execute("SELECT title, cid FROM products WHERE pid=? AND active=1", (pid,))
@@ -830,59 +811,85 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data[UD_CID] = cid
         context.user_data[UD_QTY_MAX] = stock
 
-        # send prompt like screenshot
         await q.edit_message_text(
             f"You are purchasing {title}\n\n📝 Enter a quantity between 1 and {stock}:\n\n❌ If you want to cancel the process, send /cancel"
         )
         return ST_QTY
 
-    # confirm purchase
+    # ✅ CONFIRM PURCHASE (TRANSACTION SAFE)
     if data.startswith("confirm:"):
         pid = int(data.split(":", 1)[1])
         qty = int(context.user_data.get("qty_value", 0))
         if qty <= 0:
             return await q.edit_message_text("❌ Quantity expired. Buy again.")
 
-        cur.execute("SELECT title, price, cid FROM products WHERE pid=? AND active=1", (pid,))
-        row = cur.fetchone()
-        if not row:
-            return await q.edit_message_text("❌ Product not found.")
-        title, price, cid = row
-        total = float(price) * qty
-
         uid = update.effective_user.id
-        if not charge_balance(uid, total):
-            bal = get_balance(uid)
-            return await q.edit_message_text(
-                f"❌ Insufficient balance.\nYour balance: {bal:.3f} {CURRENCY}\nRequired: {total:.3f} {CURRENCY}"
-            )
 
-        # reserve codes
-        cur.execute("SELECT code_id, code_text FROM codes WHERE pid=? AND used=0 LIMIT ?", (pid, qty))
-        picked = cur.fetchall()
-        if len(picked) < qty:
-            add_balance(uid, total)
-            return await q.edit_message_text("❌ Stock error. Try again.")
+        try:
+            con.execute("BEGIN IMMEDIATE")  # ✅ يمنع تكرار الأكواد عند ضغطين بنفس الوقت
 
-        # create order
-        cur.execute(
-            "INSERT INTO orders(user_id,pid,product_title,qty,total,status) VALUES(?,?,?,?,?,'PENDING')",
-            (uid, pid, title, qty, total),
-        )
-        oid = cur.lastrowid
+            # product check
+            cur.execute("SELECT title, price FROM products WHERE pid=? AND active=1", (pid,))
+            prow = cur.fetchone()
+            if not prow:
+                con.execute("ROLLBACK")
+                return await q.edit_message_text("❌ Product not found.")
+            title, price = prow
+            total = float(price) * qty
 
-        for code_id, _ in picked:
+            # balance check داخل نفس المعاملة
+            cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
+            brow = cur.fetchone()
+            bal = float(brow[0]) if brow else 0.0
+            if bal + 1e-9 < total:
+                con.execute("ROLLBACK")
+                return await q.edit_message_text(
+                    f"❌ Insufficient balance.\nYour balance: {bal:.3f} {CURRENCY}\nRequired: {total:.3f} {CURRENCY}"
+                )
+
+            # pick codes
+            cur.execute("SELECT code_id, code_text FROM codes WHERE pid=? AND used=0 LIMIT ?", (pid, qty))
+            picked = cur.fetchall()
+            if len(picked) < qty:
+                con.execute("ROLLBACK")
+                return await q.edit_message_text("❌ Out of stock now. Try again.")
+
+            # create order
             cur.execute(
-                "UPDATE codes SET used=1, used_at=datetime('now'), order_id=? WHERE code_id=?",
-                (oid, code_id),
+                "INSERT INTO orders(user_id,pid,product_title,qty,total,status) VALUES(?,?,?,?,?,'PENDING')",
+                (uid, pid, title, qty, total),
             )
+            oid = cur.lastrowid
 
-        codes_list = [c for _, c in picked]
-        delivered_text = "\n".join(codes_list)
-        cur.execute("UPDATE orders SET status='COMPLETED', delivered_text=? WHERE id=?", (delivered_text, oid))
-        con.commit()
+            # mark codes used (مع شرط used=0 للحماية)
+            for code_id, _ in picked:
+                cur.execute(
+                    "UPDATE codes SET used=1, used_at=datetime('now'), order_id=? WHERE code_id=? AND used=0",
+                    (oid, code_id),
+                )
+                if cur.rowcount != 1:
+                    con.execute("ROLLBACK")
+                    return await q.edit_message_text("❌ Stock conflict. Try again.")
 
-        await q.edit_message_text(f"✅ Order created!\nOrder ID: {oid}\nTotal: {total:.3f} {CURRENCY}\nDelivering codes...")
+            # deduct balance
+            cur.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (total, uid))
+
+            codes_list = [c for _, c in picked]
+            delivered_text = "\n".join(codes_list)
+            cur.execute("UPDATE orders SET status='COMPLETED', delivered_text=? WHERE id=?", (delivered_text, oid))
+
+            con.commit()
+
+        except Exception as e:
+            try:
+                con.execute("ROLLBACK")
+            except Exception:
+                pass
+            return await q.edit_message_text(f"❌ Error: {e}")
+
+        await q.edit_message_text(
+            f"✅ Order created!\nOrder ID: {oid}\nTotal: {total:.3f} {CURRENCY}\nDelivering codes..."
+        )
         await send_codes_delivery(chat_id=uid, context=context, order_id=oid, codes=codes_list)
 
         await context.bot.send_message(
@@ -931,7 +938,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dest_value = USDT_BEP20
             extra = "Network: BEP20 only."
 
-        # Copyable fields (مثل الصورة)
         text = (
             f"🔑 {method} Payment\n\n"
             f"Please send the amount to this {dest_title} and include the note\n\n"
@@ -974,7 +980,7 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode == "addprod":
             m = re.match(r'^"(.+?)"\s*\|\s*"(.+?)"\s*\|\s*([\d.]+)\s*$', text)
             if not m:
-                await update.message.reply_text("❌ Format invalid.\nExample:\n\"CAT\" | \"TITLE\" | 9.2")
+                await update.message.reply_text('❌ Format invalid.\nExample:\n"CAT" | "TITLE" | 9.2')
                 return ConversationHandler.END
             cat_title, prod_title, price_s = m.groups()
             cur.execute("SELECT cid FROM categories WHERE title=?", (cat_title,))
@@ -1001,10 +1007,18 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not codes:
                 await update.message.reply_text("❌ No codes.")
                 return ConversationHandler.END
+
+            added = 0
+            skipped = 0
             for ctext in codes:
-                cur.execute("INSERT INTO codes(pid,code_text,used) VALUES(?,?,0)", (pid, ctext))
+                try:
+                    cur.execute("INSERT INTO codes(pid,code_text,used) VALUES(?,?,0)", (pid, ctext))
+                    added += 1
+                except sqlite3.IntegrityError:
+                    skipped += 1
+
             con.commit()
-            await update.message.reply_text(f"✅ Added {len(codes)} codes to PID {pid}.")
+            await update.message.reply_text(f"✅ Added {added} codes to PID {pid}. Skipped duplicates: {skipped}")
             return ConversationHandler.END
 
         if mode == "setprice":
@@ -1111,7 +1125,7 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Admin commands (اختياري)
+# Admin commands
 # =========================
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
