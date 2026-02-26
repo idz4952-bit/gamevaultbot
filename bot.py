@@ -1200,10 +1200,16 @@ def build_app():
     app.add_handler(CommandHandler("rejectdep", rejectdep_cmd))
 
     # ✅ IMPORTANT: conv قبل menu_router حتى لا يسرق الرسائل
-    app.add_handler(conv)
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router))
 
-    return app
+app.add_handler(conv)
+
+# مهم جداً يكون آخر شيء
+app.add_handler(
+    MessageHandler(
+        filters.TEXT & ~filters.COMMAND,
+        menu_router
+    )
+)
 
 
 def main():
