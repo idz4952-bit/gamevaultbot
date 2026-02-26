@@ -43,11 +43,6 @@ SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+213xxxxxxxxx")
 SUPPORT_GROUP = os.getenv("SUPPORT_GROUP", "@yourgroup")
 SUPPORT_CHANNEL = os.getenv("SUPPORT_CHANNEL", "@yourchannel")
 
-if not TOKEN:
-    raise RuntimeError("TOKEN env var is missing")
-if ADMIN_ID == 0:
-    raise RuntimeError("ADMIN_ID env var is missing or 0")
-
 
 def is_admin(uid: int) -> bool:
     return uid == ADMIN_ID
@@ -70,6 +65,9 @@ def to_tme(x: str) -> str:
 # SORT: صغير -> كبير (تلقائي)
 # =========================
 def extract_sort_value(title: str) -> float:
+    """
+    يستخرج أول رقم من اسم المنتج لترتيب (1,2,5,10,20) أو (60,325,660...) إلخ
+    """
     t = title.replace(",", ".")
     nums = re.findall(r"\d+(?:\.\d+)?", t)
     if not nums:
@@ -144,15 +142,14 @@ CREATE TABLE IF NOT EXISTS deposits(
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- ✅ منع تكرار نفس الكود لنفس المنتج
+-- (اختياري) منع تكرار نفس الكود لنفس المنتج
 CREATE UNIQUE INDEX IF NOT EXISTS idx_codes_unique ON codes(pid, code_text);
 """
 )
 con.commit()
 
-
 # =========================
-# SEED
+# SEED: جميع الفئات والمنتجات
 # =========================
 DEFAULT_CATEGORIES = [
     "🍎 ITUNES GIFTCARD (USA)",
@@ -447,7 +444,6 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
     )
 
 
-# ✅ زر ينقله مباشرة للشحن
 def kb_topup_now() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([[InlineKeyboardButton("🔋 Top Up Now", callback_data="goto:balance")]])
 
@@ -477,7 +473,7 @@ async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"Hello, {u.first_name or 'User'}! Here’s your current balance:\n\n"
         f"💎 Telegram ID: `{uid}`\n"
         f"💎 Current Balance: *{bal:.3f}* {CURRENCY}\n\n"
-        "✨ What would you like to do next? You can top up your balance using one of the following methods:"
+        "✨ Choose a top up method:"
     )
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_balance_methods())
@@ -572,7 +568,7 @@ def smart_reply(msg: str) -> Optional[str]:
 
 
 # =========================
-# Router
+# Router (Reply Menu)
 # =========================
 async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
@@ -714,7 +710,8 @@ async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
     await context.bot.send_message(
         ADMIN_ID,
-        f"💰 DEPOSIT REVIEW\nDeposit ID: {dep_id}\nUser: {uid}\nAmount: {amount}\nTXID:\n{clean_txid}\n\nApprove: /approvedep {dep_id}\nReject: /rejectdep {dep_id}",
+        f"💰 DEPOSIT REVIEW\nDeposit ID: {dep_id}\nUser: {uid}\nAmount: {amount}\nTXID:\n{clean_txid}\n\n"
+        f"Approve: /approvedep {dep_id}\nReject: /rejectdep {dep_id}",
     )
     return ConversationHandler.END
 
@@ -730,7 +727,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "noop":
         return
 
-    # ✅ go to balance (top up)
     if data == "goto:balance":
         return await show_balance(update, context)
 
@@ -758,7 +754,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not rows:
                 return await q.edit_message_text("No products.")
             lines = [
-                f"PID {pid} | {cat} | {title} | {float(price):.3f}{CURRENCY} | {'ON' if act else 'OFF'}"
+                f"PID {pid} | {cat} | {title} | {float(price):.3f} {CURRENCY} | {'ON' if act else 'OFF'}"
                 for pid, cat, title, price, act in rows
             ]
             text = "\n".join(lines)
@@ -767,15 +763,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text(text)
 
         prompts = {
-            "addcat": "Send category title:\nExample: 🪂 PUBG MOBILE UC VOUCHERS",
+            "addcat": 'Send category title:\nExample: 🪂 PUBG MOBILE UC VOUCHERS',
             "addprod": 'Send product:\nFormat: "Category Title" | "Product Title" | price\nExample:\n"🍎 ITUNES GIFTCARD (USA)" | "10$ iTunes US" | 9.2',
-            "addcodes": "Send codes:\nFormat: pid | code1\\ncode2\\n...\nExample:\n12 | ABCD-1234\nEFGH-5678",
-            "setprice": "Send: pid | new_price\nExample: 12 | 9.5",
-            "toggle": "Send: pid (toggle ON/OFF)\nExample: 12",
-            "cancelorder": "Send: order_id (refund)\nExample: 55",
-            "approvedep": "Send: deposit_id\nExample: 10",
-            "rejectdep": "Send: deposit_id\nExample: 10",
-            "addbal": "Send: user_id | amount\nExample: 1997968014 | 5",
+            "addcodes": 'Send codes:\nFormat: pid | code1\\ncode2\\n...\nExample:\n12 | ABCD-1234\nEFGH-5678',
+            "setprice": 'Send: pid | new_price\nExample: 12 | 9.5',
+            "toggle": 'Send: pid (toggle ON/OFF)\nExample: 12',
+            "cancelorder": 'Send: order_id (refund)\nExample: 55',
+            "approvedep": 'Send: deposit_id\nExample: 10',
+            "rejectdep": 'Send: deposit_id\nExample: 10',
+            "addbal": 'Send: user_id | amount\nExample: 1997968014 | 5',
         }
         await q.edit_message_text(prompts.get(mode, "Send input now..."))
         return ST_ADMIN_INPUT
@@ -833,7 +829,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_QTY
 
-    # ✅ CONFIRM PURCHASE (Transaction Safe + زر شحن عند نقص الرصيد)
+    # confirm purchase (transaction safe)
     if data.startswith("confirm:"):
         pid = int(data.split(":", 1)[1])
         qty = int(context.user_data.get("qty_value", 0))
@@ -866,7 +862,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"Your balance: {bal:.3f} {CURRENCY}\n"
                     f"Required: {total:.3f} {CURRENCY}\n"
                     f"Missing: {missing:.3f} {CURRENCY}\n\n"
-                    f"Click below to top up your balance 👇",
+                    f"Click below to top up 👇",
                     reply_markup=kb_topup_now(),
                 )
 
@@ -884,7 +880,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             oid = cur.lastrowid
 
-            # mark codes used
+            # mark codes used (avoid race)
             for code_id, _ in picked:
                 cur.execute(
                     "UPDATE codes SET used=1, used_at=datetime('now'), order_id=? WHERE code_id=? AND used=0",
@@ -914,6 +910,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Order created!\nOrder ID: {oid}\nTotal: {total:.3f} {CURRENCY}\nDelivering codes..."
         )
         await send_codes_delivery(chat_id=uid, context=context, order_id=oid, codes=codes_list)
+
         await context.bot.send_message(
             ADMIN_ID,
             f"✅ NEW COMPLETED ORDER\nOrder ID: {oid}\nUser: {uid}\nProduct: {title}\nQty: {qty}\nTotal: {total:.3f} {CURRENCY}",
@@ -1155,17 +1152,14 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👑 Admin Panel", reply_markup=kb_admin_panel())
 
 
+# ✅ FIX: parse id from message text (works even if context.args is empty)
 async def approvedep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-
-    text = update.message.text.strip()
-
     try:
-        dep_id = int(text.split()[1])
-    except:
+        dep_id = int(update.message.text.split()[1])
+    except Exception:
         return await update.message.reply_text("Usage: /approvedep 2")
-
     context.user_data[UD_ADMIN_MODE] = "approvedep"
     update.message.text = str(dep_id)
     return await admin_input(update, context)
@@ -1174,17 +1168,14 @@ async def approvedep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def rejectdep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-
-    text = update.message.text.strip()
-
     try:
-        dep_id = int(text.split()[1])
-    except:
+        dep_id = int(update.message.text.split()[1])
+    except Exception:
         return await update.message.reply_text("Usage: /rejectdep 2")
-
     context.user_data[UD_ADMIN_MODE] = "rejectdep"
     update.message.text = str(dep_id)
     return await admin_input(update, context)
+
 
 # =========================
 # Main
@@ -1208,6 +1199,7 @@ def build_app():
     app.add_handler(CommandHandler("approvedep", approvedep_cmd))
     app.add_handler(CommandHandler("rejectdep", rejectdep_cmd))
 
+    # ✅ IMPORTANT: conv قبل menu_router حتى لا يسرق الرسائل
     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router))
 
@@ -1215,6 +1207,12 @@ def build_app():
 
 
 def main():
+    # تحقق env وقت التشغيل
+    if not TOKEN:
+        raise RuntimeError("TOKEN env var is missing")
+    if ADMIN_ID == 0:
+        raise RuntimeError("ADMIN_ID env var is missing or 0")
+
     app = build_app()
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
