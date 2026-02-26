@@ -1,3 +1,4 @@
+# bot.py
 import os
 import re
 import io
@@ -164,12 +165,14 @@ DEFAULT_CATEGORIES = [
 ]
 
 DEFAULT_PRODUCTS = [
+    # Free Fire
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "1 USD 💎 PINS 100+10", 0.920),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "2 USD 💎 PINS 210+21", 1.840),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "5 USD 💎 PINS 530+53", 4.600),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "10 USD 💎 PINS 1080+108", 9.200),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "20 USD 💎 PINS 2200+220", 18.400),
 
+    # PUBG
     ("🪂 PUBG MOBILE UC VOUCHERS", "60 UC", 0.875),
     ("🪂 PUBG MOBILE UC VOUCHERS", "325 UC", 4.375),
     ("🪂 PUBG MOBILE UC VOUCHERS", "660 UC", 8.750),
@@ -177,25 +180,30 @@ DEFAULT_PRODUCTS = [
     ("🪂 PUBG MOBILE UC VOUCHERS", "3850 UC", 44.000),
     ("🪂 PUBG MOBILE UC VOUCHERS", "8100 UC", 88.000),
 
+    # iTunes
     ("🍎 ITUNES GIFTCARD (USA)", "5$ iTunes US", 4.600),
     ("🍎 ITUNES GIFTCARD (USA)", "10$ iTunes US", 9.200),
     ("🍎 ITUNES GIFTCARD (USA)", "20$ iTunes US", 18.400),
     ("🍎 ITUNES GIFTCARD (USA)", "25$ iTunes US", 23.000),
     ("🍎 ITUNES GIFTCARD (USA)", "50$ iTunes US", 46.000),
 
+    # PlayStation
     ("🎮 PLAYSTATION USA GIFTCARDS", "10$ PSN USA", 8.900),
     ("🎮 PLAYSTATION USA GIFTCARDS", "25$ PSN USA", 22.000),
     ("🎮 PLAYSTATION USA GIFTCARDS", "50$ PSN USA", 44.000),
     ("🎮 PLAYSTATION USA GIFTCARDS", "100$ PSN USA", 88.000),
 
+    # Roblox
     ("🕹 ROBLOX (USA)", "10$ Roblox", 9.000),
     ("🕹 ROBLOX (USA)", "25$ Roblox", 22.500),
     ("🕹 ROBLOX (USA)", "50$ Roblox", 45.000),
 
+    # Steam
     ("🟦 STEAM (USA)", "10$ Steam", 9.500),
     ("🟦 STEAM (USA)", "20$ Steam", 19.000),
     ("🟦 STEAM (USA)", "50$ Steam", 47.500),
 
+    # Ludo
     ("🎲 YALLA LUDO", "3.7K Hearts + 10 RP", 9.000),
     ("🎲 YALLA LUDO", "7.5K Hearts + 20 RP", 18.000),
     ("🎲 YALLA LUDO", "24K Hearts + 60 RP", 54.000),
@@ -437,6 +445,11 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("➕ Add Balance to User", callback_data="admin:addbal")],
         ]
     )
+
+
+# ✅ زر ينقله مباشرة للشحن
+def kb_topup_now() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🔋 Top Up Now", callback_data="goto:balance")]])
 
 
 # =========================
@@ -717,6 +730,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "noop":
         return
 
+    # ✅ go to balance (top up)
+    if data == "goto:balance":
+        return await show_balance(update, context)
+
     # admin panel
     if data == "admin:panel":
         if not is_admin(update.effective_user.id):
@@ -750,15 +767,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text(text)
 
         prompts = {
-            "addcat": 'Send category title:\nExample: 🪂 PUBG MOBILE UC VOUCHERS',
+            "addcat": "Send category title:\nExample: 🪂 PUBG MOBILE UC VOUCHERS",
             "addprod": 'Send product:\nFormat: "Category Title" | "Product Title" | price\nExample:\n"🍎 ITUNES GIFTCARD (USA)" | "10$ iTunes US" | 9.2',
-            "addcodes": 'Send codes:\nFormat: pid | code1\\ncode2\\n...\nExample:\n12 | ABCD-1234\nEFGH-5678',
-            "setprice": 'Send: pid | new_price\nExample: 12 | 9.5',
-            "toggle": 'Send: pid (toggle ON/OFF)\nExample: 12',
-            "cancelorder": 'Send: order_id (refund)\nExample: 55',
-            "approvedep": 'Send: deposit_id\nExample: 10',
-            "rejectdep": 'Send: deposit_id\nExample: 10',
-            "addbal": 'Send: user_id | amount\nExample: 1997968014 | 5',
+            "addcodes": "Send codes:\nFormat: pid | code1\\ncode2\\n...\nExample:\n12 | ABCD-1234\nEFGH-5678",
+            "setprice": "Send: pid | new_price\nExample: 12 | 9.5",
+            "toggle": "Send: pid (toggle ON/OFF)\nExample: 12",
+            "cancelorder": "Send: order_id (refund)\nExample: 55",
+            "approvedep": "Send: deposit_id\nExample: 10",
+            "rejectdep": "Send: deposit_id\nExample: 10",
+            "addbal": "Send: user_id | amount\nExample: 1997968014 | 5",
         }
         await q.edit_message_text(prompts.get(mode, "Send input now..."))
         return ST_ADMIN_INPUT
@@ -816,7 +833,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_QTY
 
-    # ✅ CONFIRM PURCHASE (TRANSACTION SAFE)
+    # ✅ CONFIRM PURCHASE (Transaction Safe + زر شحن عند نقص الرصيد)
     if data.startswith("confirm:"):
         pid = int(data.split(":", 1)[1])
         qty = int(context.user_data.get("qty_value", 0))
@@ -826,7 +843,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = update.effective_user.id
 
         try:
-            con.execute("BEGIN IMMEDIATE")  # ✅ يمنع تكرار الأكواد عند ضغطين بنفس الوقت
+            con.execute("BEGIN IMMEDIATE")
 
             # product check
             cur.execute("SELECT title, price FROM products WHERE pid=? AND active=1", (pid,))
@@ -837,14 +854,20 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             title, price = prow
             total = float(price) * qty
 
-            # balance check داخل نفس المعاملة
+            # balance check (inside txn)
             cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
             brow = cur.fetchone()
             bal = float(brow[0]) if brow else 0.0
             if bal + 1e-9 < total:
                 con.execute("ROLLBACK")
+                missing = total - bal
                 return await q.edit_message_text(
-                    f"❌ Insufficient balance.\nYour balance: {bal:.3f} {CURRENCY}\nRequired: {total:.3f} {CURRENCY}"
+                    f"❌ Insufficient balance.\n\n"
+                    f"Your balance: {bal:.3f} {CURRENCY}\n"
+                    f"Required: {total:.3f} {CURRENCY}\n"
+                    f"Missing: {missing:.3f} {CURRENCY}\n\n"
+                    f"Click below to top up your balance 👇",
+                    reply_markup=kb_topup_now(),
                 )
 
             # pick codes
@@ -861,7 +884,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             oid = cur.lastrowid
 
-            # mark codes used (مع شرط used=0 للحماية)
+            # mark codes used
             for code_id, _ in picked:
                 cur.execute(
                     "UPDATE codes SET used=1, used_at=datetime('now'), order_id=? WHERE code_id=? AND used=0",
@@ -891,7 +914,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"✅ Order created!\nOrder ID: {oid}\nTotal: {total:.3f} {CURRENCY}\nDelivering codes..."
         )
         await send_codes_delivery(chat_id=uid, context=context, order_id=oid, codes=codes_list)
-
         await context.bot.send_message(
             ADMIN_ID,
             f"✅ NEW COMPLETED ORDER\nOrder ID: {oid}\nUser: {uid}\nProduct: {title}\nQty: {qty}\nTotal: {total:.3f} {CURRENCY}",
