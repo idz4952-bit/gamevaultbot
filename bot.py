@@ -1195,10 +1195,10 @@ def build_app():
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("approvedep", approvedep_cmd))
-    app.add_handler(CommandHandler("rejectdep", rejectdep_cmd))
-
+    
+     app.add_handler(conv)
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router))
-    app.add_handler(conv)
+   
 
     return app
 
