@@ -34,7 +34,7 @@ DB_PATH = os.getenv("DB_PATH", "shop.db")
 
 CURRENCY = os.getenv("CURRENCY", "$")
 
-BINANCE_UID = os.getenv("BINANCE_ID", "YOUR_BINANCE_ID_ADDRESS")
+BINANCE_UID = os.getenv("BINANCE_UID", "YOUR_BINANCE_UID_ADDRESS")
 BYBIT_UID = os.getenv("BYBIT_UID", "12345678")
 USDT_TRC20 = os.getenv("USDT_TRC20", "YOUR_USDT_TRC20_ADDRESS")
 USDT_BEP20 = os.getenv("USDT_BEP20", "YOUR_USDT_BEP20_ADDRESS")
@@ -42,6 +42,13 @@ USDT_BEP20 = os.getenv("USDT_BEP20", "YOUR_USDT_BEP20_ADDRESS")
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+213xxxxxxxxx")
 SUPPORT_GROUP = os.getenv("SUPPORT_GROUP", "@yourgroup")
 SUPPORT_CHANNEL = os.getenv("SUPPORT_CHANNEL", "@yourchannel")
+
+# اخفاء اقسام (حسب الدوائر الحمراء)
+HIDDEN_CATEGORIES = {
+    "🎲 YALLA LUDO",
+    "🕹 ROBLOX (USA)",
+    "🟦 STEAM (USA)",
+}
 
 if not TOKEN:
     raise RuntimeError("TOKEN env var is missing")
@@ -67,7 +74,7 @@ def to_tme(x: str) -> str:
 
 
 # =========================
-# SORT: صغير -> كبير (تلقائي)
+# SORT: صغير -> كبير
 # =========================
 def extract_sort_value(title: str) -> float:
     t = title.replace(",", ".")
@@ -99,7 +106,6 @@ CREATE TABLE IF NOT EXISTS categories(
   title TEXT NOT NULL UNIQUE
 );
 
--- product_type: 'CODE' فقط (تسليم تلقائي)
 CREATE TABLE IF NOT EXISTS products(
   pid INTEGER PRIMARY KEY AUTOINCREMENT,
   cid INTEGER NOT NULL,
@@ -110,7 +116,6 @@ CREATE TABLE IF NOT EXISTS products(
   FOREIGN KEY(cid) REFERENCES categories(cid)
 );
 
--- مخزون الأكواد
 CREATE TABLE IF NOT EXISTS codes(
   code_id INTEGER PRIMARY KEY AUTOINCREMENT,
   pid INTEGER NOT NULL,
@@ -128,29 +133,27 @@ CREATE TABLE IF NOT EXISTS orders(
   product_title TEXT NOT NULL,
   qty INTEGER NOT NULL,
   total REAL NOT NULL,
-  status TEXT NOT NULL DEFAULT 'PENDING',  -- PENDING/COMPLETED/CANCELLED
+  status TEXT NOT NULL DEFAULT 'PENDING',
   delivered_text TEXT,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- طلبات الشحن (TopUp)
 CREATE TABLE IF NOT EXISTS deposits(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
-  method TEXT NOT NULL,    -- BINANCE/BYBIT/TRC20/BEP20
+  method TEXT NOT NULL,
   note TEXT NOT NULL,
   txid TEXT,
   amount REAL,
-  status TEXT NOT NULL DEFAULT 'WAITING_PAYMENT', -- WAITING_PAYMENT/PAID/PENDING_REVIEW/APPROVED/REJECTED
+  status TEXT NOT NULL DEFAULT 'WAITING_PAYMENT',
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
--- Manual Orders (Shahid / FreeFire MENA)
 CREATE TABLE IF NOT EXISTS manual_orders(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
-  service TEXT NOT NULL,       -- SHAHID / FREEFIRE_MENA
-  plan_title TEXT NOT NULL,    -- display
+  service TEXT NOT NULL,
+  plan_title TEXT NOT NULL,
   price REAL NOT NULL,
   email TEXT,
   password TEXT,
@@ -164,15 +167,15 @@ CREATE TABLE IF NOT EXISTS manual_orders(
 con.commit()
 
 
-def ensure_schema_migrations():
-    # منع تكرار الأكواد: نضيف Unique Index (يتجاهل لو موجود)
+def ensure_schema():
+    # منع تكرار الأكواد داخل نفس المنتج
     try:
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_codes_unique ON codes(pid, code_text)")
         con.commit()
     except Exception:
         pass
 
-    # لو كان manual_orders قديم ناقص أعمدة، نضيفها بهدوء
+    # ضمان وجود أعمدة لو DB قديم
     for col, ctype in [("player_id", "TEXT"), ("note", "TEXT")]:
         try:
             cur.execute(f"ALTER TABLE manual_orders ADD COLUMN {col} {ctype}")
@@ -181,31 +184,32 @@ def ensure_schema_migrations():
             pass
 
 
-ensure_schema_migrations()
+ensure_schema()
 
 
 # =========================
-# SEED: جميع الفئات + منتجات
+# SEED
 # =========================
 DEFAULT_CATEGORIES = [
     "🍎 ITUNES GIFTCARD (USA)",
     "🪂 PUBG MOBILE UC VOUCHERS",
     "💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)",
-    "🎲 YALLA LUDO",
     "🎮 PLAYSTATION USA GIFTCARDS",
-    "🕹 ROBLOX (USA)",
-    "🟦 STEAM (USA)",
+    # مخفي:
+    # "🎲 YALLA LUDO",
+    # "🕹 ROBLOX (USA)",
+    # "🟦 STEAM (USA)",
 ]
 
 DEFAULT_PRODUCTS = [
-    # Free Fire (مرتبة)
+    # Free Fire (OFFICIAL PINS)
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "1 USD 💎 PINS 100+10", 0.920),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "2 USD 💎 PINS 210+21", 1.840),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "5 USD 💎 PINS 530+53", 4.600),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "10 USD 💎 PINS 1080+108", 9.200),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "20 USD 💎 PINS 2200+220", 18.400),
 
-    # PUBG (مرتبة)
+    # PUBG
     ("🪂 PUBG MOBILE UC VOUCHERS", "60 UC", 0.875),
     ("🪂 PUBG MOBILE UC VOUCHERS", "325 UC", 4.375),
     ("🪂 PUBG MOBILE UC VOUCHERS", "660 UC", 8.750),
@@ -219,28 +223,13 @@ DEFAULT_PRODUCTS = [
     ("🍎 ITUNES GIFTCARD (USA)", "20$ iTunes US", 18.400),
     ("🍎 ITUNES GIFTCARD (USA)", "25$ iTunes US", 23.000),
     ("🍎 ITUNES GIFTCARD (USA)", "50$ iTunes US", 46.000),
-    ("🍎 ITUNES GIFTCARD (USA)", "100$ iTunes US", 92.000),  # ✅ Added
+    ("🍎 ITUNES GIFTCARD (USA)", "100$ iTunes US", 92.000),  # ✅
 
     # PlayStation
     ("🎮 PLAYSTATION USA GIFTCARDS", "10$ PSN USA", 8.900),
     ("🎮 PLAYSTATION USA GIFTCARDS", "25$ PSN USA", 22.000),
     ("🎮 PLAYSTATION USA GIFTCARDS", "50$ PSN USA", 44.000),
     ("🎮 PLAYSTATION USA GIFTCARDS", "100$ PSN USA", 88.000),
-
-    # Roblox
-    ("🕹 ROBLOX (USA)", "10$ Roblox", 9.000),
-    ("🕹 ROBLOX (USA)", "25$ Roblox", 22.500),
-    ("🕹 ROBLOX (USA)", "50$ Roblox", 45.000),
-
-    # Steam
-    ("🟦 STEAM (USA)", "10$ Steam", 9.500),
-    ("🟦 STEAM (USA)", "20$ Steam", 19.000),
-    ("🟦 STEAM (USA)", "50$ Steam", 47.500),
-
-    # Ludo
-    ("🎲 YALLA LUDO", "3.7K Hearts + 10 RP", 9.000),
-    ("🎲 YALLA LUDO", "7.5K Hearts + 20 RP", 18.000),
-    ("🎲 YALLA LUDO", "24K Hearts + 60 RP", 54.000),
 ]
 
 
@@ -287,7 +276,6 @@ ST_QTY = 10
 ST_TOPUP_DETAILS = 20
 ST_ADMIN_INPUT = 99
 
-# Manual
 ST_MANUAL_EMAIL = 30
 ST_MANUAL_PASS = 31
 ST_FF_PLAYERID = 32
@@ -299,12 +287,11 @@ UD_DEP_ID = "dep_id"
 UD_ADMIN_MODE = "admin_mode"
 UD_ORD_RNG = "orders_rng"
 
-# Manual Keys
 UD_MANUAL_SERVICE = "manual_service"
 UD_MANUAL_PLAN = "manual_plan"
 UD_MANUAL_PRICE = "manual_price"
-UD_MANUAL_EMAIL = "manual_email"
 UD_MANUAL_PLAN_TITLE = "manual_plan_title"
+UD_MANUAL_EMAIL = "manual_email"
 
 UD_FF_CART = "ff_cart"
 UD_FF_TOTAL = "ff_total"
@@ -360,7 +347,7 @@ def charge_balance(uid: int, amount: float) -> bool:
 
 
 # =========================
-# Delivery: <=200 رسالة، >200 ملف
+# Delivery
 # =========================
 MAX_CODES_IN_MESSAGE = 200
 TELEGRAM_TEXT_LIMIT = 3800
@@ -390,7 +377,6 @@ async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, 
         await context.bot.send_message(chat_id=chat_id, text=text)
         return
 
-    # split long message
     await context.bot.send_message(chat_id=chat_id, text=header + "🎁 Codes (part 1):")
     chunk = ""
     part = 1
@@ -421,6 +407,8 @@ def kb_categories() -> InlineKeyboardMarkup:
     )
     rows = []
     for cid, title, cnt in cur.fetchall():
+        if title in HIDDEN_CATEGORIES:
+            continue
         rows.append([InlineKeyboardButton(f"{title} | {cnt}", callback_data=f"cat:{cid}")])
     rows.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin:panel")])
     return InlineKeyboardMarkup(rows)
@@ -532,12 +520,12 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
 
 
 # =========================
-# Manual Order System (Shahid + FreeFire)
+# Manual Order (Shahid + FreeFire MENA Cart)
 # =========================
 FF_PACKS = [
-    ("FF_100",  "100+10",   110, 0.930),
-    ("FF_210",  "210+21",   231, 1.860),
-    ("FF_530",  "530+53",   583, 4.650),
+    ("FF_100", "100+10", 110, 0.930),
+    ("FF_210", "210+21", 231, 1.860),
+    ("FF_530", "530+53", 583, 4.650),
     ("FF_1080", "1080+108", 1188, 9.300),
     ("FF_2200", "2200+220", 2420, 18.600),
 ]
@@ -572,7 +560,6 @@ def _ff_calc_totals(cart: Dict[str, int]):
         total_price += price * qty
         total_diamonds += diamonds * qty
         lines.append((title, qty, price, diamonds))
-    # keep order like FF_PACKS
     order_map = {t: i for i, (_, t, _, _) in enumerate(FF_PACKS)}
     lines.sort(key=lambda x: order_map.get(x[0], 999))
     return total_price, total_diamonds, lines
@@ -635,7 +622,7 @@ def ff_checkout_text(context) -> str:
     text_lines.append(f"💎 Total Diamonds: {total_diamonds}")
     text_lines.append(f"💰 Total: ${total_price:.3f}")
     text_lines.append("")
-    text_lines.append("🆔 Enter Player ID to proceed:\n\n❌ /cancel to stop")
+    text_lines.append("🆔 Enter Player ID (NUMBERS only) to proceed:\n❌ /cancel to stop")
 
     context.user_data[UD_FF_TOTAL] = float(total_price)
     context.user_data["ff_total_diamonds"] = int(total_diamonds)
@@ -647,7 +634,6 @@ def ff_checkout_text(context) -> str:
 # =========================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
-    # ensure admin exists in DB too
     ensure_user_exists(ADMIN_ID)
     await update.message.reply_text("✅ Bot is online!", reply_markup=REPLY_MENU)
 
@@ -747,9 +733,6 @@ async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_support())
 
 
-# =========================
-# Smart tips
-# =========================
 def smart_reply(msg: str) -> Optional[str]:
     m = msg.lower()
     if any(x in m for x in ["price", "سعر", "كم", "ثمن"]):
@@ -764,7 +747,7 @@ def smart_reply(msg: str) -> Optional[str]:
 
 
 # =========================
-# Router (Reply Menu)
+# Router
 # =========================
 async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
@@ -783,10 +766,7 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_support(update, context)
 
     if t == "⚡ Manual Order":
-        return await update.message.reply_text(
-            "⚡ MANUAL ORDER\nSelect a service:",
-            reply_markup=kb_manual_services(),
-        )
+        return await update.message.reply_text("⚡ MANUAL ORDER\nSelect a service:", reply_markup=kb_manual_services())
 
     hint = smart_reply(t)
     if hint:
@@ -796,7 +776,7 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Quantity input (/cancel)
+# Qty input
 # =========================
 async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
@@ -848,7 +828,7 @@ async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Topup details input: Amount | TXID
+# Topup details
 # =========================
 async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
@@ -901,7 +881,7 @@ async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 # =========================
-# Manual Inputs: Shahid Email/Pass + FreeFire PlayerID
+# Manual: Shahid Email/Pass
 # =========================
 async def manual_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
@@ -941,9 +921,10 @@ async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not charge_balance(uid, price):
         bal = get_balance(uid)
+        missing = price - bal
         await update.message.reply_text(
-            f"❌ Insufficient balance.\nYour balance: {bal:.3f} {CURRENCY}\nRequired: {price:.3f} {CURRENCY}",
-            reply_markup=REPLY_MENU,
+            f"❌ Insufficient balance.\nYour balance: {bal:.3f} {CURRENCY}\nRequired: {price:.3f} {CURRENCY}\nMissing: {missing:.3f} {CURRENCY}",
+            reply_markup=kb_topup_now(),
         )
         return ConversationHandler.END
 
@@ -964,9 +945,7 @@ async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(
         ADMIN_ID,
-        f"⚡ MANUAL ORDER (SHAHID)\n"
-        f"Manual ID: {mid}\nUser: {uid}\nPlan: {plan_title}\nPrice: {price:.3f} {CURRENCY}\n"
-        f"Gmail: {email}\nPassword: {pwd}\n"
+        f"⚡ MANUAL ORDER (SHAHID)\nManual ID: {mid}\nUser: {uid}\nPlan: {plan_title}\nPrice: {price:.3f} {CURRENCY}\nGmail: {email}\nPassword: {pwd}\n"
     )
 
     for k in [UD_MANUAL_SERVICE, UD_MANUAL_PLAN, UD_MANUAL_PRICE, UD_MANUAL_PLAN_TITLE, UD_MANUAL_EMAIL]:
@@ -974,6 +953,9 @@ async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+# =========================
+# Manual: FreeFire PlayerID (Digits Only + /cancel works)
+# =========================
 async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
 
@@ -984,22 +966,27 @@ async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
         return ConversationHandler.END
 
-    player_id = txt
-    if len(player_id) < 4:
-        return await update.message.reply_text("❌ Enter a valid Player ID (at least 4 chars).")
+    player_id = txt.replace(" ", "")
+    if not player_id.isdigit():
+        return await update.message.reply_text("❌ Player ID must be NUMBERS only.\nExample: 123456789")
+
+    if len(player_id) < 6:
+        return await update.message.reply_text("❌ Player ID is too short.\nExample: 123456789")
 
     uid = update.effective_user.id
     cart = _ff_cart_get(context)
     total_price, total_diamonds, lines = _ff_calc_totals(cart)
+
     if not lines or total_price <= 0:
         await update.message.reply_text("🛒 Cart is empty. Open Manual Order again.", reply_markup=REPLY_MENU)
         return ConversationHandler.END
 
     if not charge_balance(uid, total_price):
         bal = get_balance(uid)
+        missing = total_price - bal
         await update.message.reply_text(
-            f"❌ Insufficient balance.\nYour balance: {bal:.3f} {CURRENCY}\nRequired: {total_price:.3f} {CURRENCY}",
-            reply_markup=REPLY_MENU,
+            f"❌ Insufficient balance.\nYour balance: {bal:.3f} {CURRENCY}\nRequired: {total_price:.3f} {CURRENCY}\nMissing: {missing:.3f} {CURRENCY}",
+            reply_markup=kb_topup_now(),
         )
         return ConversationHandler.END
 
@@ -1059,14 +1046,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "goto:topup":
         return await show_balance(update, context)
 
-    # Manual: back/services
-    if data == "manual:back":
+    # Manual navigation
+    if data == "manual:back" or data == "manual:services":
         return await q.edit_message_text("⚡ MANUAL ORDER\nSelect a service:", reply_markup=kb_manual_services())
 
-    if data == "manual:services":
-        return await q.edit_message_text("⚡ MANUAL ORDER\nSelect a service:", reply_markup=kb_manual_services())
-
-    # Manual: Shahid
+    # Manual Shahid
     if data == "manual:shahid":
         text = (
             "📺 Shahid — Select a product:\n\n"
@@ -1092,11 +1076,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if bal + 1e-9 < price:
             missing = price - bal
             return await q.edit_message_text(
-                f"❌ Insufficient balance.\n\n"
-                f"Your balance: {bal:.3f} {CURRENCY}\n"
-                f"Required: {price:.3f} {CURRENCY}\n"
-                f"Missing: {missing:.3f} {CURRENCY}\n\n"
-                f"Click below to top up 👇",
+                f"❌ Insufficient balance.\n\nYour balance: {bal:.3f} {CURRENCY}\nRequired: {price:.3f} {CURRENCY}\nMissing: {missing:.3f} {CURRENCY}\n\nClick below to top up 👇",
                 reply_markup=kb_topup_now(),
             )
 
@@ -1106,12 +1086,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data[UD_MANUAL_PLAN_TITLE] = plan_title
 
         await q.edit_message_text(
-            f"✅ Selected: {plan_title}\nPrice: {price:.3f} {CURRENCY}\n\n"
-            "📩 Send NEW Gmail address now:\n\n/cancel to stop"
+            f"✅ Selected: {plan_title}\nPrice: {price:.3f} {CURRENCY}\n\n📩 Send NEW Gmail address now:\n\n/cancel to stop"
         )
         return ST_MANUAL_EMAIL
 
-    # Manual: FreeFire
+    # Manual FreeFire
     if data == "manual:ff":
         return await q.edit_message_text(ff_menu_text(), reply_markup=kb_ff_menu(context))
 
@@ -1141,18 +1120,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if bal + 1e-9 < total_price:
             missing = total_price - bal
             return await q.edit_message_text(
-                f"❌ Insufficient balance.\n\n"
-                f"Your balance: {bal:.3f} {CURRENCY}\n"
-                f"Required: {total_price:.3f} {CURRENCY}\n"
-                f"Missing: {missing:.3f} {CURRENCY}\n\n"
-                f"Click below to top up 👇",
+                f"❌ Insufficient balance.\n\nYour balance: {bal:.3f} {CURRENCY}\nRequired: {total_price:.3f} {CURRENCY}\nMissing: {missing:.3f} {CURRENCY}\n\nClick below to top up 👇",
                 reply_markup=kb_topup_now(),
             )
 
         await q.edit_message_text(ff_checkout_text(context))
         return ST_FF_PLAYERID
 
-    # admin panel
+    # Admin panel
     if data == "admin:panel":
         if not is_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
@@ -1196,7 +1171,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(prompts.get(mode, "Send input now..."))
         return ST_ADMIN_INPUT
 
-    # navigation
+    # Navigation
     if data == "back:cats":
         return await show_categories(update, context)
 
@@ -1209,7 +1184,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cid = int(data.split(":", 2)[2])
         return await q.edit_message_text("Choose a product:", reply_markup=kb_products(cid))
 
-    # view product
+    # View
     if data.startswith("view:"):
         pid = int(data.split(":", 1)[1])
         cur.execute("SELECT title, price, cid FROM products WHERE pid=? AND active=1", (pid,))
@@ -1228,7 +1203,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return await q.edit_message_text(text, reply_markup=kb_product_view(pid, cid))
 
-    # buy -> ask quantity
+    # Buy -> qty
     if data.startswith("buy:"):
         pid = int(data.split(":", 1)[1])
         cur.execute("SELECT title, cid FROM products WHERE pid=? AND active=1", (pid,))
@@ -1249,7 +1224,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_QTY
 
-    # confirm purchase
+    # Confirm purchase
     if data.startswith("confirm:"):
         pid = int(data.split(":", 1)[1])
         qty = int(context.user_data.get("qty_value", 0))
@@ -1272,14 +1247,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb_topup_now(),
             )
 
-        # reserve codes
         cur.execute("SELECT code_id, code_text FROM codes WHERE pid=? AND used=0 LIMIT ?", (pid, qty))
         picked = cur.fetchall()
         if len(picked) < qty:
             add_balance(uid, total)
             return await q.edit_message_text("❌ Stock error. Try again.")
 
-        # create order
         cur.execute(
             "INSERT INTO orders(user_id,pid,product_title,qty,total,status) VALUES(?,?,?,?,?,'PENDING')",
             (uid, pid, title, qty, total),
@@ -1306,7 +1279,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    # Orders pagination / filters
+    # Orders pagination
     if data.startswith("orders:range:"):
         _, _, rng, page = data.split(":")
         return await show_orders(update, context, rng=rng, page=int(page))
@@ -1316,7 +1289,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         rng = context.user_data.get(UD_ORD_RNG) or "all"
         return await show_orders(update, context, rng=rng, page=int(page))
 
-    # Payment method
+    # Payment
     if data.startswith("pay:"):
         method = data.split(":", 1)[1]
         uid = update.effective_user.id
@@ -1357,7 +1330,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_have_paid(dep_id))
         return
 
-    # I Have Paid -> ask for amount|txid
     if data.startswith("paid:"):
         dep_id = int(data.split(":", 1)[1])
         context.user_data[UD_DEP_ID] = dep_id
@@ -1369,7 +1341,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Admin input handler
+# Admin input
 # =========================
 async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
@@ -1377,6 +1349,11 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     mode = context.user_data.get(UD_ADMIN_MODE)
     text = (update.message.text or "").strip()
+
+    # allow /cancel here too
+    if text.lower() in ("/cancel", "cancel"):
+        await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
 
     try:
         if mode == "addcat":
@@ -1584,27 +1561,28 @@ def build_app():
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(on_callback)],
         states={
-            ST_QTY: [MessageHandler(filters.TEXT & ~filters.COMMAND, qty_input)],
-            ST_TOPUP_DETAILS: [MessageHandler(filters.TEXT & ~filters.COMMAND, topup_details_input)],
-            ST_ADMIN_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_input)],
-            ST_MANUAL_EMAIL: [MessageHandler(filters.TEXT & ~filters.COMMAND, manual_email_input)],
-            ST_MANUAL_PASS: [MessageHandler(filters.TEXT & ~filters.COMMAND, manual_pass_input)],
-            ST_FF_PLAYERID: [MessageHandler(filters.TEXT & ~filters.COMMAND, ff_playerid_input)],
+            # ✅ filters.TEXT (حتى /cancel يوصل)
+            ST_QTY: [MessageHandler(filters.TEXT, qty_input)],
+            ST_TOPUP_DETAILS: [MessageHandler(filters.TEXT, topup_details_input)],
+            ST_ADMIN_INPUT: [MessageHandler(filters.TEXT, admin_input)],
+            ST_MANUAL_EMAIL: [MessageHandler(filters.TEXT, manual_email_input)],
+            ST_MANUAL_PASS: [MessageHandler(filters.TEXT, manual_pass_input)],
+            ST_FF_PLAYERID: [MessageHandler(filters.TEXT, ff_playerid_input)],
         },
         fallbacks=[CommandHandler("start", start_cmd)],
         allow_reentry=True,
     )
 
-    # Commands
+    # Commands first
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("approvedep", approvedep_cmd))
     app.add_handler(CommandHandler("rejectdep", rejectdep_cmd))
 
-    # IMPORTANT: Conversation handler first
+    # Conversation next
     app.add_handler(conv)
 
-    # Menu router last (so it won't steal conv messages)
+    # Menu last
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router))
 
     return app
