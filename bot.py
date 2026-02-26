@@ -1158,10 +1158,16 @@ async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def approvedep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return
-    if not context.args:
-        return await update.message.reply_text("Usage: /approvedep <deposit_id>")
+
+    text = update.message.text.strip()
+
+    try:
+        dep_id = int(text.split()[1])
+    except:
+        return await update.message.reply_text("Usage: /approvedep 2")
+
     context.user_data[UD_ADMIN_MODE] = "approvedep"
-    update.message.text = context.args[0]
+    update.message.text = str(dep_id)
     return await admin_input(update, context)
 
 
