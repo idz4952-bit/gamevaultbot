@@ -2,10 +2,12 @@
 import os
 import re
 import io
+import csv
+import zipfile
 import sqlite3
 import secrets
 import logging
-import traceback
+from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple, Dict
 
@@ -15,6 +17,7 @@ from telegram import (
     InlineKeyboardMarkup,
     ReplyKeyboardMarkup,
     KeyboardButton,
+    InputFile,
 )
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -31,17 +34,30 @@ from telegram.ext import (
 # Logging
 # =========================
 logging.basicConfig(
-    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    level=logging.INFO,
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
-logger = logging.getLogger("shopbot")
+logger = logging.getLogger("gamevaultbot")
 
 # =========================
 # ENV
 # =========================
 TOKEN = os.getenv("TOKEN")
+
+# Supports either ADMIN_ID or ADMIN_IDS="id1,id2,id3"
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-DB_PATH = os.getenv("DB_PATH", "/var/data/shop.db")
+ADMIN_IDS_RAW = os.getenv("ADMIN_IDS", "").strip()
+ADMIN_IDS: set[int] = set()
+if ADMIN_IDS_RAW:
+    for x in ADMIN_IDS_RAW.split(","):
+        x = x.strip()
+        if x.isdigit():
+            ADMIN_IDS.add(int(x))
+if ADMIN_ID:
+    ADMIN_IDS.add(ADMIN_ID)
+
+DB_PATH = os.getenv("DB_PATH", "shop.db")
+
 CURRENCY = os.getenv("CURRENCY", "$")
 
 BINANCE_UID = os.getenv("BINANCE_ID", "YOUR_BINANCE_ID_ADDRESS")
@@ -53,7 +69,7 @@ SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+213xxxxxxxxx")
 SUPPORT_GROUP = os.getenv("SUPPORT_GROUP", "@yourgroup")
 SUPPORT_CHANNEL = os.getenv("SUPPORT_CHANNEL", "@yourchannel")
 
-# اخفاء اقسام
+# اخفاء اقسام (اختياري)
 HIDDEN_CATEGORIES = {
     "🎲 YALLA LUDO",
     "🕹 ROBLOX (USA)",
@@ -62,12 +78,16 @@ HIDDEN_CATEGORIES = {
 
 if not TOKEN:
     raise RuntimeError("TOKEN env var is missing")
-if ADMIN_ID == 0:
-    raise RuntimeError("ADMIN_ID env var is missing or 0")
+if not ADMIN_IDS:
+    raise RuntimeError("ADMIN_ID/ADMIN_IDS env var is missing")
+
+# ensure DB dir exists (important for /var/data)
+db_dir = os.path.dirname(DB_PATH) or "."
+os.makedirs(db_dir, exist_ok=True)
 
 
 def is_admin(uid: int) -> bool:
-    return uid == ADMIN_ID
+    return uid in ADMIN_IDS
 
 
 def money(x: float) -> str:
@@ -113,7 +133,8 @@ CREATE TABLE IF NOT EXISTS users(
 
 CREATE TABLE IF NOT EXISTS categories(
   cid INTEGER PRIMARY KEY AUTOINCREMENT,
-  title TEXT NOT NULL UNIQUE
+  title TEXT NOT NULL UNIQUE,
+  hidden INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS products(
@@ -193,9 +214,15 @@ def ensure_schema():
         except Exception:
             pass
 
+    # add hidden column if old db
+    try:
+        cur.execute("ALTER TABLE categories ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+        con.commit()
+    except Exception:
+        pass
+
 
 ensure_schema()
-
 
 # =========================
 # SEED
@@ -237,7 +264,7 @@ DEFAULT_PRODUCTS = [
 
 def seed_defaults():
     for cat in DEFAULT_CATEGORIES:
-        cur.execute("INSERT OR IGNORE INTO categories(title) VALUES(?)", (cat,))
+        cur.execute("INSERT OR IGNORE INTO categories(title, hidden) VALUES(?,0)", (cat,))
     con.commit()
 
     for cat, title, price in DEFAULT_PRODUCTS:
@@ -276,17 +303,20 @@ REPLY_MENU = ReplyKeyboardMarkup(
 # =========================
 ST_QTY = 10
 ST_TOPUP_DETAILS = 20
-ST_ADMIN_INPUT = 99
 
 ST_MANUAL_EMAIL = 30
 ST_MANUAL_PASS = 31
 ST_FF_PLAYERID = 32
 
+# Admin conversational states
+ST_ADMIN_TEXT = 99
+ST_ADMIN_DOC = 98
+
+# user_data keys
 UD_PID = "pid"
 UD_CID = "cid"
 UD_QTY_MAX = "qty_max"
 UD_DEP_ID = "dep_id"
-UD_ADMIN_MODE = "admin_mode"
 UD_ORD_RNG = "orders_rng"
 
 UD_MANUAL_SERVICE = "manual_service"
@@ -297,6 +327,11 @@ UD_MANUAL_EMAIL = "manual_email"
 
 UD_FF_CART = "ff_cart"
 UD_FF_TOTAL = "ff_total"
+
+# admin user_data
+AD_MODE = "ad_mode"
+AD_TMP = "ad_tmp"
+AD_PAGE = "ad_page"
 
 
 # =========================
@@ -395,12 +430,12 @@ async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, 
 
 
 # =========================
-# Keyboards
+# Keyboards (Shop)
 # =========================
-def kb_categories(is_admin_user: bool = False) -> InlineKeyboardMarkup:
+def kb_categories() -> InlineKeyboardMarkup:
     cur.execute(
         """
-        SELECT c.cid, c.title, COUNT(p.pid)
+        SELECT c.cid, c.title, c.hidden, COUNT(p.pid)
         FROM categories c
         LEFT JOIN products p ON p.cid=c.cid AND p.active=1
         GROUP BY c.cid
@@ -408,15 +443,13 @@ def kb_categories(is_admin_user: bool = False) -> InlineKeyboardMarkup:
         """
     )
     rows = []
-    for cid, title, cnt in cur.fetchall():
+    for cid, title, hidden, cnt in cur.fetchall():
         if title in HIDDEN_CATEGORIES:
             continue
+        if int(hidden) == 1:
+            continue
         rows.append([InlineKeyboardButton(f"{title} | {cnt}", callback_data=f"cat:{cid}")])
-
-    # ✅ إظهار زر الأدمن فقط للأدمن
-    if is_admin_user:
-        rows.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin:panel")])
-
+    rows.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin:home")])
     return InlineKeyboardMarkup(rows)
 
 
@@ -464,7 +497,9 @@ def kb_balance_methods() -> InlineKeyboardMarkup:
 
 
 def kb_have_paid(dep_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ I Have Paid", callback_data=f"paid:{dep_id}")]])
+    return InlineKeyboardMarkup(
+        [[InlineKeyboardButton("✅ I Have Paid", callback_data=f"paid:{dep_id}")]]
+    )
 
 
 def kb_topup_now() -> InlineKeyboardMarkup:
@@ -501,24 +536,6 @@ def kb_support() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("✉️ Contact Support", url=to_tme(SUPPORT_GROUP))],
             [InlineKeyboardButton("📣 Visit Support Channel", url=to_tme(SUPPORT_CHANNEL))],
-        ]
-    )
-
-
-def kb_admin_panel() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("📋 List Products (PID)", callback_data="admin:listprod")],
-            [InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat")],
-            [InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod")],
-            [InlineKeyboardButton("➕ Add Codes (stock)", callback_data="admin:addcodes")],
-            [InlineKeyboardButton("💲 Set Price", callback_data="admin:setprice")],
-            [InlineKeyboardButton("⛔ Toggle Product", callback_data="admin:toggle")],
-            [InlineKeyboardButton("❌ Cancel Order (refund)", callback_data="admin:cancelorder")],
-            [InlineKeyboardButton("💰 Approve Deposit", callback_data="admin:approvedep")],
-            [InlineKeyboardButton("🚫 Reject Deposit", callback_data="admin:rejectdep")],
-            [InlineKeyboardButton("➕ Add Balance to User", callback_data="admin:addbal")],
-            [InlineKeyboardButton("➖ Take Balance (to Admin)", callback_data="admin:takebal")],
         ]
     )
 
@@ -634,29 +651,271 @@ def ff_checkout_text(context) -> str:
 
 
 # =========================
-# Pages
+# Admin Panel (PRO UI)
+# =========================
+def kb_admin_home() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("📁 Categories", callback_data="ad:cats:0"),
+             InlineKeyboardButton("🧩 Products", callback_data="ad:prods:0")],
+            [InlineKeyboardButton("🔑 Codes / Stock", callback_data="ad:codes:home"),
+             InlineKeyboardButton("📦 Orders", callback_data="ad:orders:0")],
+            [InlineKeyboardButton("💰 Deposits", callback_data="ad:deps:0"),
+             InlineKeyboardButton("👤 Users", callback_data="ad:users:home")],
+            [InlineKeyboardButton("📊 Stats", callback_data="ad:stats"),
+             InlineKeyboardButton("⬅️ Back", callback_data="back:cats")],
+        ]
+    )
+
+
+def kb_admin_back_home() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Admin Home", callback_data="admin:home")]])
+
+
+def _paginate(items: List[Tuple], page: int, page_size: int = 8):
+    total = len(items)
+    total_pages = max(1, (total + page_size - 1) // page_size)
+    page = max(0, min(page, total_pages - 1))
+    chunk = items[page * page_size:(page + 1) * page_size]
+    return chunk, page, total_pages
+
+
+def kb_admin_pager(prefix: str, page: int, total_pages: int, extra_row: Optional[List[InlineKeyboardButton]] = None):
+    row = []
+    if page > 0:
+        row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"{prefix}:{page-1}"))
+    else:
+        row.append(InlineKeyboardButton("—", callback_data="noop"))
+    row.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        row.append(InlineKeyboardButton("Next ➡️", callback_data=f"{prefix}:{page+1}"))
+    else:
+        row.append(InlineKeyboardButton("—", callback_data="noop"))
+
+    rows = [row]
+    if extra_row:
+        rows.append(extra_row)
+    rows.append([InlineKeyboardButton("⬅️ Admin Home", callback_data="admin:home")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def admin_home(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    if q:
+        await q.edit_message_text("👑 Admin Panel", reply_markup=kb_admin_home())
+    else:
+        await update.message.reply_text("👑 Admin Panel", reply_markup=kb_admin_home())
+
+
+# ---- Categories ----
+def _cats_all():
+    cur.execute("SELECT cid,title,hidden FROM categories ORDER BY title")
+    return cur.fetchall()
+
+
+def kb_admin_cats(page: int):
+    items = _cats_all()
+    chunk, page, total_pages = _paginate(items, page, page_size=8)
+    rows = []
+    for cid, title, hidden in chunk:
+        eye = "🙈" if int(hidden) else "👁"
+        rows.append([InlineKeyboardButton(f"{eye} {title}", callback_data=f"ad:cat:menu:{cid}")])
+    extra = [
+        InlineKeyboardButton("➕ Add", callback_data="ad:cat:add"),
+        InlineKeyboardButton("🔎 Search", callback_data="ad:cat:search"),
+    ]
+    return kb_admin_pager("ad:cats", page, total_pages, extra_row=extra)
+
+
+def kb_admin_cat_menu(cid: int):
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✏️ Rename", callback_data=f"ad:cat:rename:{cid}")],
+            [InlineKeyboardButton("👁/🙈 Toggle Hide", callback_data=f"ad:cat:toggle:{cid}")],
+            [InlineKeyboardButton("🗑 Delete", callback_data=f"ad:cat:del:{cid}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="ad:cats:0")],
+        ]
+    )
+
+
+# ---- Products ----
+def _prods_all():
+    cur.execute(
+        """
+        SELECT p.pid, p.title, p.price, p.active, c.title, p.cid
+        FROM products p JOIN categories c ON c.cid=p.cid
+        ORDER BY c.title, p.title
+        """
+    )
+    return cur.fetchall()
+
+
+def kb_admin_prods(page: int):
+    items = _prods_all()
+    chunk, page, total_pages = _paginate(items, page, page_size=7)
+    rows = []
+    for pid, title, price, active, cat_title, cid in chunk:
+        st = "🟢" if int(active) else "🔴"
+        rows.append([InlineKeyboardButton(f"{st} PID {pid} | {cat_title} | {title} | {float(price):.3f}",
+                                          callback_data=f"ad:prod:menu:{pid}")])
+    extra = [
+        InlineKeyboardButton("➕ Add", callback_data="ad:prod:add"),
+        InlineKeyboardButton("🔎 Search PID", callback_data="ad:prod:search"),
+    ]
+    return kb_admin_pager("ad:prods", page, total_pages, extra_row=extra)
+
+
+def kb_admin_prod_menu(pid: int):
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💲 Set Price", callback_data=f"ad:prod:price:{pid}")],
+            [InlineKeyboardButton("✏️ Rename", callback_data=f"ad:prod:rename:{pid}")],
+            [InlineKeyboardButton("⛔ Toggle ON/OFF", callback_data=f"ad:prod:toggle:{pid}")],
+            [InlineKeyboardButton("📦 Stock", callback_data=f"ad:prod:stock:{pid}")],
+            [InlineKeyboardButton("🗑 Delete", callback_data=f"ad:prod:del:{pid}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="ad:prods:0")],
+        ]
+    )
+
+
+# ---- Codes ----
+def kb_admin_codes_home():
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("➕ Add codes (Text)", callback_data="ad:codes:addtxt")],
+            [InlineKeyboardButton("📄 Upload codes .txt", callback_data="ad:codes:upload")],
+            [InlineKeyboardButton("🧹 Delete a code", callback_data="ad:codes:del")],
+            [InlineKeyboardButton("📤 Export unused by PID", callback_data="ad:codes:export")],
+            [InlineKeyboardButton("⬅️ Admin Home", callback_data="admin:home")],
+        ]
+    )
+
+
+# ---- Orders ----
+def _orders_recent(limit: int = 50):
+    cur.execute(
+        """
+        SELECT id,user_id,product_title,qty,total,status,created_at
+        FROM orders ORDER BY id DESC LIMIT ?
+        """,
+        (limit,),
+    )
+    return cur.fetchall()
+
+
+def kb_admin_orders(page: int):
+    items = _orders_recent(80)
+    chunk, page, total_pages = _paginate(items, page, page_size=6)
+    rows = []
+    for oid, uid, title, qty, total, status, created_at in chunk:
+        rows.append([InlineKeyboardButton(f"#{oid} | {status} | {uid} | {qty} | {float(total):.3f}",
+                                          callback_data=f"ad:ord:menu:{oid}")])
+    extra = [
+        InlineKeyboardButton("🔎 Find by ID", callback_data="ad:ord:find"),
+        InlineKeyboardButton("♻️ Resend codes", callback_data="ad:ord:resend"),
+    ]
+    return kb_admin_pager("ad:orders", page, total_pages, extra_row=extra)
+
+
+def kb_admin_order_menu(oid: int):
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("❌ Cancel + refund (if not completed)", callback_data=f"ad:ord:cancel:{oid}")],
+            [InlineKeyboardButton("♻️ Resend delivery", callback_data=f"ad:ord:resendone:{oid}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="ad:orders:0")],
+        ]
+    )
+
+
+# ---- Deposits ----
+def _deps_pending():
+    cur.execute(
+        """
+        SELECT id,user_id,method,note,txid,amount,status,created_at
+        FROM deposits
+        WHERE status IN ('PENDING_REVIEW','WAITING_PAYMENT')
+        ORDER BY id DESC
+        """
+    )
+    return cur.fetchall()
+
+
+def kb_admin_deps(page: int):
+    items = _deps_pending()
+    chunk, page, total_pages = _paginate(items, page, page_size=6)
+    rows = []
+    for dep_id, uid, method, note, txid, amount, status, created_at in chunk:
+        short_tx = (txid or "")[:12] + ("..." if txid and len(txid) > 12 else "")
+        rows.append([InlineKeyboardButton(f"DEP {dep_id} | {status} | {uid} | {method} | {amount} | {short_tx}",
+                                          callback_data=f"ad:dep:menu:{dep_id}")])
+    extra = [
+        InlineKeyboardButton("🔎 Find by ID", callback_data="ad:dep:find"),
+        InlineKeyboardButton("↻ Refresh", callback_data="ad:deps:0"),
+    ]
+    return kb_admin_pager("ad:deps", page, total_pages, extra_row=extra)
+
+
+def kb_admin_dep_menu(dep_id: int):
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Approve", callback_data=f"ad:dep:approve:{dep_id}")],
+            [InlineKeyboardButton("❌ Reject", callback_data=f"ad:dep:reject:{dep_id}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="ad:deps:0")],
+        ]
+    )
+
+
+# ---- Users ----
+def kb_admin_users_home():
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔎 Find user by ID", callback_data="ad:user:find")],
+            [InlineKeyboardButton("➕ Add balance", callback_data="ad:user:addbal")],
+            [InlineKeyboardButton("➖ Deduct balance", callback_data="ad:user:takebal")],
+            [InlineKeyboardButton("⬅️ Admin Home", callback_data="admin:home")],
+        ]
+    )
+
+
+# ---- Stats ----
+def get_stats():
+    cur.execute("SELECT COUNT(*) FROM users")
+    users = int(cur.fetchone()[0])
+
+    cur.execute("SELECT COUNT(*), COALESCE(SUM(total),0) FROM orders WHERE status='COMPLETED'")
+    orders_count, revenue = cur.fetchone()
+    orders_count = int(orders_count or 0)
+    revenue = float(revenue or 0)
+
+    cur.execute(
+        """
+        SELECT product_title, COUNT(*), SUM(total)
+        FROM orders WHERE status='COMPLETED'
+        GROUP BY product_title
+        ORDER BY SUM(total) DESC
+        LIMIT 5
+        """
+    )
+    top = cur.fetchall()
+    return users, orders_count, revenue, top
+
+
+# =========================
+# Pages (Shop)
 # =========================
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
-    ensure_user_exists(ADMIN_ID)
+    for aid in ADMIN_IDS:
+        ensure_user_exists(aid)
     await update.message.reply_text("✅ Bot is online!", reply_markup=REPLY_MENU)
-
-
-async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # ✅ /cancel يعمل في أي وقت
-    context.user_data.clear()
-    if update.message:
-        await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
-    return ConversationHandler.END
 
 
 async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🛒 Here are our product categories!\nSelect a category to explore our offerings"
-    kb = kb_categories(is_admin(update.effective_user.id))
     if update.message:
-        await update.message.reply_text(text, reply_markup=kb)
+        await update.message.reply_text(text, reply_markup=kb_categories())
     else:
-        await update.callback_query.edit_message_text(text, reply_markup=kb)
+        await update.callback_query.edit_message_text(text, reply_markup=kb_categories())
 
 
 async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -702,7 +961,7 @@ def _format_orders_page(rows: List[Tuple], page: int, page_size: int = 4) -> Tup
     total = len(rows)
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
-    chunk = rows[page * page_size : (page + 1) * page_size]
+    chunk = rows[page * page_size: (page + 1) * page_size]
 
     if not chunk:
         return ("📦 No orders found for this period.", 1)
@@ -795,9 +1054,8 @@ async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
 
     if txt.lower() in ("/cancel", "cancel"):
-        context.user_data.pop(UD_PID, None)
-        context.user_data.pop(UD_CID, None)
-        context.user_data.pop(UD_QTY_MAX, None)
+        for k in [UD_PID, UD_CID, UD_QTY_MAX, "qty_value"]:
+            context.user_data.pop(k, None)
         await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
         return ConversationHandler.END
 
@@ -871,7 +1129,7 @@ async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         await update.message.reply_text("❌ Deposit not found.")
         return ConversationHandler.END
 
-    if row[1] not in ("WAITING_PAYMENT", "PAID"):
+    if row[1] not in ("WAITING_PAYMENT", "PAID", "PENDING_REVIEW"):
         await update.message.reply_text("❌ This deposit is already processed.")
         return ConversationHandler.END
 
@@ -886,10 +1144,11 @@ async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"✅ Received.\nDeposit ID: {dep_id}\nStatus: PENDING_REVIEW\n\nWe will approve soon.",
         reply_markup=REPLY_MENU,
     )
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"💰 DEPOSIT REVIEW\nDeposit ID: {dep_id}\nUser: {uid}\nAmount: {amount}\nTXID:\n{txid}\n\nApprove: /approvedep {dep_id}\nReject: /rejectdep {dep_id}",
-    )
+    for aid in ADMIN_IDS:
+        await context.bot.send_message(
+            aid,
+            f"💰 DEPOSIT REVIEW\nDeposit ID: {dep_id}\nUser: {uid}\nAmount: {amount}\nTXID:\n{txid}\n\n(Use Admin Panel → Deposits)",
+        )
     return ConversationHandler.END
 
 
@@ -956,10 +1215,11 @@ async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=REPLY_MENU,
     )
 
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"⚡ MANUAL ORDER (SHAHID)\nManual ID: {mid}\nUser: {uid}\nPlan: {plan_title}\nPrice: {price:.3f} {CURRENCY}\nGmail: {email}\nPassword: {pwd}\n"
-    )
+    for aid in ADMIN_IDS:
+        await context.bot.send_message(
+            aid,
+            f"⚡ MANUAL ORDER (SHAHID)\nManual ID: {mid}\nUser: {uid}\nPlan: {plan_title}\nPrice: {price:.3f} {CURRENCY}\nGmail: {email}\nPassword: {pwd}\n"
+        )
 
     for k in [UD_MANUAL_SERVICE, UD_MANUAL_PLAN, UD_MANUAL_PRICE, UD_MANUAL_PLAN_TITLE, UD_MANUAL_EMAIL]:
         context.user_data.pop(k, None)
@@ -1030,13 +1290,14 @@ async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=REPLY_MENU,
     )
 
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"⚡ MANUAL ORDER (FREE FIRE MENA)\n"
-        f"Manual ID: {mid}\nUser: {uid}\nPlayer ID: {player_id}\n"
-        f"Total Diamonds: {total_diamonds}\nTotal: {total_price:.3f} {CURRENCY}\n\n"
-        f"Cart:\n{note}"
-    )
+    for aid in ADMIN_IDS:
+        await context.bot.send_message(
+            aid,
+            f"⚡ MANUAL ORDER (FREE FIRE MENA)\n"
+            f"Manual ID: {mid}\nUser: {uid}\nPlayer ID: {player_id}\n"
+            f"Total Diamonds: {total_diamonds}\nTotal: {total_price:.3f} {CURRENCY}\n\n"
+            f"Cart:\n{note}"
+        )
 
     context.user_data.pop(UD_FF_CART, None)
     context.user_data.pop(UD_FF_TOTAL, None)
@@ -1045,7 +1306,339 @@ async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Callback handler
+# Admin Text Handler (one state for many actions)
+# =========================
+def _ad_set(context, mode: str, tmp: dict):
+    context.user_data[AD_MODE] = mode
+    context.user_data[AD_TMP] = tmp or {}
+
+
+def _ad_get(context):
+    return context.user_data.get(AD_MODE), (context.user_data.get(AD_TMP) or {})
+
+
+async def admin_text_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+
+    txt = (update.message.text or "").strip()
+    if txt.lower() in ("/cancel", "cancel"):
+        _ad_set(context, "", {})
+        await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+
+    mode, tmp = _ad_get(context)
+
+    try:
+        # Category add
+        if mode == "cat_add":
+            title = txt
+            cur.execute("INSERT OR IGNORE INTO categories(title,hidden) VALUES(?,0)", (title,))
+            con.commit()
+            _ad_set(context, "", {})
+            await update.message.reply_text("✅ Category added.", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+
+        # Category rename
+        if mode == "cat_rename":
+            cid = int(tmp["cid"])
+            cur.execute("UPDATE categories SET title=? WHERE cid=?", (txt, cid))
+            con.commit()
+            _ad_set(context, "", {})
+            await update.message.reply_text("✅ Category renamed.", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+
+        # Category search
+        if mode == "cat_search":
+            q = txt.lower()
+            cur.execute("SELECT cid,title,hidden FROM categories WHERE lower(title) LIKE ? ORDER BY title", (f"%{q}%",))
+            rows = cur.fetchall()
+            if not rows:
+                await update.message.reply_text("No categories found.", reply_markup=REPLY_MENU)
+                return ConversationHandler.END
+            lines = [f"{cid} | {'HIDDEN' if int(h) else 'SHOW'} | {t}" for cid, t, h in rows[:50]]
+            await update.message.reply_text("\n".join(lines), reply_markup=REPLY_MENU)
+            _ad_set(context, "", {})
+            return ConversationHandler.END
+
+        # Product add: CAT_ID | TITLE | PRICE
+        if mode == "prod_add":
+            # Format: cid | title | price
+            if "|" not in txt:
+                await update.message.reply_text("❌ Format: cid | title | price\nExample: 3 | 10$ PSN USA | 8.9")
+                return ConversationHandler.END
+            parts = [x.strip() for x in txt.split("|")]
+            if len(parts) != 3:
+                await update.message.reply_text("❌ Format: cid | title | price")
+                return ConversationHandler.END
+            cid = int(parts[0])
+            title = parts[1]
+            price = float(parts[2])
+            cur.execute("SELECT cid FROM categories WHERE cid=?", (cid,))
+            if not cur.fetchone():
+                await update.message.reply_text("❌ Category id not found.")
+                return ConversationHandler.END
+            cur.execute("INSERT INTO products(cid,title,price,product_type,active) VALUES(?,?,?,'CODE',1)", (cid, title, price))
+            con.commit()
+            _ad_set(context, "", {})
+            await update.message.reply_text("✅ Product added.", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+
+        # Product search PID
+        if mode == "prod_search":
+            pid = int(txt)
+            cur.execute(
+                """
+                SELECT p.pid,p.title,p.price,p.active,c.title
+                FROM products p JOIN categories c ON c.cid=p.cid
+                WHERE p.pid=?
+                """,
+                (pid,),
+            )
+            row = cur.fetchone()
+            if not row:
+                await update.message.reply_text("❌ Product not found.", reply_markup=REPLY_MENU)
+                return ConversationHandler.END
+            pid, title, price, active, cat = row
+            stock = product_stock(pid)
+            await update.message.reply_text(
+                f"PID {pid}\nCategory: {cat}\nTitle: {title}\nPrice: {float(price):.3f}\nActive: {active}\nStock: {stock}",
+                reply_markup=REPLY_MENU,
+            )
+            _ad_set(context, "", {})
+            return ConversationHandler.END
+
+        # Product price set
+        if mode == "prod_price":
+            pid = int(tmp["pid"])
+            price = float(txt)
+            cur.execute("UPDATE products SET price=? WHERE pid=?", (price, pid))
+            con.commit()
+            _ad_set(context, "", {})
+            await update.message.reply_text("✅ Price updated.", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+
+        # Product rename
+        if mode == "prod_rename":
+            pid = int(tmp["pid"])
+            cur.execute("UPDATE products SET title=? WHERE pid=?", (txt, pid))
+            con.commit()
+            _ad_set(context, "", {})
+            await update.message.reply_text("✅ Product renamed.", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+
+        # Codes add via text: pid | codes lines...
+        if mode == "codes_addtxt":
+            if "|" not in txt:
+                await update.message.reply_text("❌ Format: pid | CODE1\\nCODE2...\nExample:\n12 | AAAA-1111\nBBBB-2222")
+                return ConversationHandler.END
+            pid_s, blob = [x.strip() for x in txt.split("|", 1)]
+            pid = int(pid_s)
+            codes = [c.strip() for c in blob.splitlines() if c.strip()]
+            if not codes:
+                await update.message.reply_text("❌ No codes found.")
+                return ConversationHandler.END
+            added, skipped = 0, 0
+            for ctext in codes:
+                try:
+                    cur.execute("INSERT INTO codes(pid,code_text,used) VALUES(?,?,0)", (pid, ctext))
+                    added += 1
+                except sqlite3.IntegrityError:
+                    skipped += 1
+            con.commit()
+            _ad_set(context, "", {})
+            await update.message.reply_text(f"✅ Added {added} codes to PID {pid}.\n♻️ Skipped duplicates: {skipped}", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+
+        # Codes delete: pid | code
+        if mode == "codes_del":
+            if "|" not in txt:
+                await update.message.reply_text("❌ Format: pid | code_text")
+                return ConversationHandler.END
+            pid_s, code_text = [x.strip() for x in txt.split("|", 1)]
+            pid = int(pid_s)
+            cur.execute("DELETE FROM codes WHERE pid=? AND code_text=? AND used=0", (pid, code_text))
+            con.commit()
+            _ad_set(context, "", {})
+            await update.message.reply_text("✅ Deleted (only if unused).", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+
+        # Codes export: pid
+        if mode == "codes_export":
+            pid = int(txt)
+            cur.execute("SELECT code_text FROM codes WHERE pid=? AND used=0 ORDER BY code_id ASC", (pid,))
+            rows = cur.fetchall()
+            codes = [r[0] for r in rows]
+            if not codes:
+                await update.message.reply_text("No unused codes.", reply_markup=REPLY_MENU)
+                _ad_set(context, "", {})
+                return ConversationHandler.END
+            content = "\n".join(codes)
+            bio = io.BytesIO(content.encode("utf-8"))
+            bio.name = f"pid_{pid}_unused_codes.txt"
+            await update.message.reply_document(document=bio, caption=f"Unused codes for PID {pid}")
+            _ad_set(context, "", {})
+            return ConversationHandler.END
+
+        # Orders find by id
+        if mode == "ord_find":
+            oid = int(txt)
+            cur.execute("SELECT id,user_id,pid,product_title,qty,total,status,delivered_text,created_at FROM orders WHERE id=?", (oid,))
+            row = cur.fetchone()
+            if not row:
+                await update.message.reply_text("❌ Order not found.", reply_markup=REPLY_MENU)
+                return ConversationHandler.END
+            oid, uid, pid, title, qty, total, status, delivered, created = row
+            await update.message.reply_text(
+                f"Order #{oid}\nUser: {uid}\nProduct: {title}\nQty: {qty}\nTotal: {float(total):.3f}\nStatus: {status}\nCreated: {created}",
+                reply_markup=REPLY_MENU,
+            )
+            _ad_set(context, "", {})
+            return ConversationHandler.END
+
+        # Orders resend codes by id
+        if mode == "ord_resend":
+            oid = int(txt)
+            cur.execute("SELECT user_id, delivered_text, status FROM orders WHERE id=?", (oid,))
+            row = cur.fetchone()
+            if not row:
+                await update.message.reply_text("❌ Order not found.", reply_markup=REPLY_MENU)
+                return ConversationHandler.END
+            uid, delivered_text, status = row
+            codes = (delivered_text or "").splitlines()
+            await send_codes_delivery(chat_id=int(uid), context=context, order_id=oid, codes=codes)
+            await update.message.reply_text("✅ Resent delivery to user.", reply_markup=REPLY_MENU)
+            _ad_set(context, "", {})
+            return ConversationHandler.END
+
+        # Deposit find by id
+        if mode == "dep_find":
+            dep_id = int(txt)
+            cur.execute("SELECT id,user_id,method,note,txid,amount,status,created_at FROM deposits WHERE id=?", (dep_id,))
+            row = cur.fetchone()
+            if not row:
+                await update.message.reply_text("❌ Deposit not found.", reply_markup=REPLY_MENU)
+                return ConversationHandler.END
+            dep_id, uid, method, note, txid, amount, status, created = row
+            await update.message.reply_text(
+                f"DEP {dep_id}\nUser: {uid}\nMethod: {method}\nAmount: {amount}\nStatus: {status}\nNote: {note}\nTXID: {txid}\nCreated: {created}",
+                reply_markup=REPLY_MENU,
+            )
+            _ad_set(context, "", {})
+            return ConversationHandler.END
+
+        # User find
+        if mode == "user_find":
+            uid = int(txt)
+            ensure_user_exists(uid)
+            cur.execute("SELECT username, first_name, balance FROM users WHERE user_id=?", (uid,))
+            row = cur.fetchone()
+            if not row:
+                await update.message.reply_text("User not found.", reply_markup=REPLY_MENU)
+                return ConversationHandler.END
+            username, first_name, bal = row
+            await update.message.reply_text(
+                f"User {uid}\nUsername: @{username}\nName: {first_name}\nBalance: {float(bal):.3f} {CURRENCY}",
+                reply_markup=REPLY_MENU,
+            )
+            _ad_set(context, "", {})
+            return ConversationHandler.END
+
+        # User add balance: user_id | amount
+        if mode == "user_addbal":
+            if "|" not in txt:
+                await update.message.reply_text("❌ Format: user_id | amount")
+                return ConversationHandler.END
+            uid_s, amount_s = [x.strip() for x in txt.split("|", 1)]
+            uid = int(uid_s)
+            amount = float(amount_s)
+            add_balance(uid, amount)
+            await update.message.reply_text(f"✅ Added +{money(amount)} to {uid}", reply_markup=REPLY_MENU)
+            await context.bot.send_message(uid, f"✅ Admin added balance: +{money(amount)}")
+            _ad_set(context, "", {})
+            return ConversationHandler.END
+
+        # User take balance: user_id | amount
+        if mode == "user_takebal":
+            if "|" not in txt:
+                await update.message.reply_text("❌ Format: user_id | amount")
+                return ConversationHandler.END
+            uid_s, amount_s = [x.strip() for x in txt.split("|", 1)]
+            uid = int(uid_s)
+            amount = float(amount_s)
+            if not charge_balance(uid, amount):
+                bal = get_balance(uid)
+                await update.message.reply_text(f"❌ Insufficient. User balance: {bal:.3f} {CURRENCY}", reply_markup=REPLY_MENU)
+                return ConversationHandler.END
+            # optionally add to first admin
+            any_admin = next(iter(ADMIN_IDS))
+            add_balance(any_admin, amount)
+            await update.message.reply_text(f"✅ Deducted -{money(amount)} from {uid}", reply_markup=REPLY_MENU)
+            await context.bot.send_message(uid, f"➖ Admin deducted: -{money(amount)}")
+            _ad_set(context, "", {})
+            return ConversationHandler.END
+
+        await update.message.reply_text("❌ Admin action expired. Open Admin Panel again.", reply_markup=REPLY_MENU)
+        _ad_set(context, "", {})
+        return ConversationHandler.END
+
+    except Exception as e:
+        logger.exception("admin_text_input error")
+        await update.message.reply_text(f"❌ Error: {e}", reply_markup=REPLY_MENU)
+        _ad_set(context, "", {})
+        return ConversationHandler.END
+
+
+# =========================
+# Admin Doc Handler (upload codes TXT)
+# =========================
+async def admin_doc_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+
+    mode, tmp = _ad_get(context)
+    if mode != "codes_upload":
+        await update.message.reply_text("❌ No upload session. Open Admin → Codes → Upload.", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+
+    doc = update.message.document
+    if not doc:
+        await update.message.reply_text("❌ Send a .txt document.", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+
+    if doc.file_size and doc.file_size > 3_000_000:
+        await update.message.reply_text("❌ File too large (max ~3MB).", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+
+    pid = int(tmp.get("pid", 0))
+    if pid <= 0:
+        await update.message.reply_text("❌ Missing PID. Open Upload again.", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+
+    tg_file = await doc.get_file()
+    content = (await tg_file.download_as_bytearray()).decode("utf-8", errors="ignore")
+    codes = [c.strip() for c in content.splitlines() if c.strip()]
+    if not codes:
+        await update.message.reply_text("❌ No codes found in file.", reply_markup=REPLY_MENU)
+        _ad_set(context, "", {})
+        return ConversationHandler.END
+
+    added, skipped = 0, 0
+    for ctext in codes:
+        try:
+            cur.execute("INSERT INTO codes(pid,code_text,used) VALUES(?,?,0)", (pid, ctext))
+            added += 1
+        except sqlite3.IntegrityError:
+            skipped += 1
+    con.commit()
+
+    await update.message.reply_text(f"✅ Uploaded.\nPID {pid}\nAdded: {added}\nSkipped duplicates: {skipped}", reply_markup=REPLY_MENU)
+    _ad_set(context, "", {})
+    return ConversationHandler.END
+
+
+# =========================
+# Callback handler (Shop + Admin)
 # =========================
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -1055,12 +1648,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "noop":
         return
 
+    # goto topup
     if data == "goto:topup":
         return await show_balance(update, context)
 
+    # Manual navigation
     if data == "manual:back" or data == "manual:services":
         return await q.edit_message_text("⚡ MANUAL ORDER\nSelect a service:", reply_markup=kb_manual_services())
 
+    # Manual Shahid
     if data == "manual:shahid":
         text = (
             "📺 Shahid — Select a product:\n\n"
@@ -1100,6 +1696,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_MANUAL_EMAIL
 
+    # Manual FreeFire
     if data == "manual:ff":
         return await q.edit_message_text(ff_menu_text(), reply_markup=kb_ff_menu(context))
 
@@ -1136,54 +1733,334 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(ff_checkout_text(context))
         return ST_FF_PLAYERID
 
-    # Admin panel
-    if data == "admin:panel":
+    # =========================
+    # ADMIN PANEL (PRO)
+    # =========================
+    if data == "admin:home":
         if not is_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
-        return await q.edit_message_text("👑 Admin Panel", reply_markup=kb_admin_panel())
+        return await admin_home(update, context)
 
-    if data.startswith("admin:"):
+    # Admin categories list page
+    if data.startswith("ad:cats:"):
         if not is_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
-        mode = data.split(":", 1)[1]
-        context.user_data[UD_ADMIN_MODE] = mode
+        page = int(data.split(":")[2])
+        return await q.edit_message_text("📁 Categories", reply_markup=kb_admin_cats(page))
 
-        if mode == "listprod":
-            cur.execute(
-                """
-                SELECT p.pid, c.title, p.title, p.price, p.active
-                FROM products p JOIN categories c ON c.cid=p.cid
-                ORDER BY c.title, p.title
-                """
-            )
-            rows = cur.fetchall()
-            if not rows:
-                return await q.edit_message_text("No products.")
-            lines = [
-                f"PID {pid} | {cat} | {title} | {price}$ | {'ON' if act else 'OFF'}"
-                for pid, cat, title, price, act in rows
-            ]
-            text = "\n".join(lines)
-            if len(text) > 3800:
-                text = text[:3800] + "\n..."
-            return await q.edit_message_text(text)
+    if data.startswith("ad:cat:menu:"):
+        if not is_admin(update.effective_user.id):
+            return await q.edit_message_text("❌ Not allowed.")
+        cid = int(data.split(":")[3])
+        cur.execute("SELECT title, hidden FROM categories WHERE cid=?", (cid,))
+        row = cur.fetchone()
+        if not row:
+            return await q.edit_message_text("❌ Category not found.", reply_markup=kb_admin_back_home())
+        title, hidden = row
+        st = "HIDDEN 🙈" if int(hidden) else "VISIBLE 👁"
+        return await q.edit_message_text(f"📁 Category #{cid}\n{title}\nStatus: {st}", reply_markup=kb_admin_cat_menu(cid))
 
-        prompts = {
-            "addcat": 'Send category title:\nExample: 🪂 PUBG MOBILE UC VOUCHERS',
-            "addprod": 'Send product:\nFormat: "Category Title" | "Product Title" | price\nExample:\n"🍎 ITUNES GIFTCARD (USA)" | "10$ iTunes US" | 9.2',
-            "addcodes": 'Send codes:\nFormat: pid | code1\\ncode2\\n...\nExample:\n12 | ABCD-1234\nEFGH-5678',
-            "setprice": 'Send: pid | new_price\nExample: 12 | 9.5',
-            "toggle": 'Send: pid (toggle ON/OFF)\nExample: 12',
-            "cancelorder": 'Send: order_id (refund)\nExample: 55',
-            "approvedep": 'Send: deposit_id\nExample: 10',
-            "rejectdep": 'Send: deposit_id\nExample: 10',
-            "addbal": 'Send: user_id | amount\nExample: 1997968014 | 5',
-            "takebal": 'Send: user_id | amount\nExample: 1997968014 | 5',
-        }
-        await q.edit_message_text(prompts.get(mode, "Send input now..."))
-        return ST_ADMIN_INPUT
+    if data == "ad:cat:add":
+        _ad_set(context, "cat_add", {})
+        return await q.edit_message_text("➕ Send category title now:\n\n/cancel to stop", reply_markup=kb_admin_back_home())
 
-    # Navigation
+    if data.startswith("ad:cat:rename:"):
+        cid = int(data.split(":")[3])
+        _ad_set(context, "cat_rename", {"cid": cid})
+        return await q.edit_message_text("✏️ Send new category title:\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    if data.startswith("ad:cat:toggle:"):
+        cid = int(data.split(":")[3])
+        cur.execute("SELECT hidden FROM categories WHERE cid=?", (cid,))
+        row = cur.fetchone()
+        if not row:
+            return await q.edit_message_text("❌ Not found.", reply_markup=kb_admin_back_home())
+        newv = 0 if int(row[0]) else 1
+        cur.execute("UPDATE categories SET hidden=? WHERE cid=?", (newv, cid))
+        con.commit()
+        return await q.edit_message_text("✅ Updated.", reply_markup=kb_admin_cats(0))
+
+    if data.startswith("ad:cat:del:"):
+        cid = int(data.split(":")[3])
+        # prevent delete if products exist
+        cur.execute("SELECT COUNT(*) FROM products WHERE cid=?", (cid,))
+        cnt = int(cur.fetchone()[0])
+        if cnt > 0:
+            return await q.edit_message_text("❌ Can't delete. Category has products. Delete/move products first.", reply_markup=kb_admin_cat_menu(cid))
+        cur.execute("DELETE FROM categories WHERE cid=?", (cid,))
+        con.commit()
+        return await q.edit_message_text("✅ Deleted.", reply_markup=kb_admin_cats(0))
+
+    if data == "ad:cat:search":
+        _ad_set(context, "cat_search", {})
+        return await q.edit_message_text("🔎 Send search text for categories:\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    # Admin products list
+    if data.startswith("ad:prods:"):
+        if not is_admin(update.effective_user.id):
+            return await q.edit_message_text("❌ Not allowed.")
+        page = int(data.split(":")[2])
+        return await q.edit_message_text("🧩 Products", reply_markup=kb_admin_prods(page))
+
+    if data.startswith("ad:prod:menu:"):
+        pid = int(data.split(":")[3])
+        cur.execute(
+            """
+            SELECT p.pid,p.title,p.price,p.active,c.title
+            FROM products p JOIN categories c ON c.cid=p.cid
+            WHERE p.pid=?
+            """,
+            (pid,),
+        )
+        row = cur.fetchone()
+        if not row:
+            return await q.edit_message_text("❌ Product not found.", reply_markup=kb_admin_back_home())
+        pid, title, price, active, cat = row
+        stock = product_stock(pid)
+        st = "ON 🟢" if int(active) else "OFF 🔴"
+        return await q.edit_message_text(
+            f"🧩 PID {pid}\nCategory: {cat}\nTitle: {title}\nPrice: {float(price):.3f} {CURRENCY}\nStatus: {st}\nStock: {stock}",
+            reply_markup=kb_admin_prod_menu(pid),
+        )
+
+    if data == "ad:prod:add":
+        # show how to get cid list quickly
+        cur.execute("SELECT cid,title FROM categories ORDER BY title")
+        rows = cur.fetchall()
+        sample = "\n".join([f"{cid} | {t}" for cid, t in rows[:12]])
+        _ad_set(context, "prod_add", {})
+        return await q.edit_message_text(
+            "➕ Add Product\nSend:\n`cid | title | price`\n\nExample:\n`3 | 10$ PSN USA | 8.9`\n\nCategories sample:\n"
+            + sample
+            + "\n\n/cancel to stop",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_admin_back_home(),
+        )
+
+    if data == "ad:prod:search":
+        _ad_set(context, "prod_search", {})
+        return await q.edit_message_text("🔎 Send PID number:\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    if data.startswith("ad:prod:price:"):
+        pid = int(data.split(":")[3])
+        _ad_set(context, "prod_price", {"pid": pid})
+        return await q.edit_message_text("💲 Send new price:\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    if data.startswith("ad:prod:rename:"):
+        pid = int(data.split(":")[3])
+        _ad_set(context, "prod_rename", {"pid": pid})
+        return await q.edit_message_text("✏️ Send new product title:\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    if data.startswith("ad:prod:toggle:"):
+        pid = int(data.split(":")[3])
+        cur.execute("SELECT active FROM products WHERE pid=?", (pid,))
+        row = cur.fetchone()
+        if not row:
+            return await q.edit_message_text("❌ Product not found.", reply_markup=kb_admin_back_home())
+        newv = 0 if int(row[0]) else 1
+        cur.execute("UPDATE products SET active=? WHERE pid=?", (newv, pid))
+        con.commit()
+        return await q.edit_message_text("✅ Updated.", reply_markup=kb_admin_prods(0))
+
+    if data.startswith("ad:prod:stock:"):
+        pid = int(data.split(":")[3])
+        stock = product_stock(pid)
+        return await q.edit_message_text(f"📦 Stock for PID {pid}: {stock} unused codes", reply_markup=kb_admin_prod_menu(pid))
+
+    if data.startswith("ad:prod:del:"):
+        pid = int(data.split(":")[3])
+        # delete product only if no orders? allow but keep safe
+        cur.execute("SELECT COUNT(*) FROM orders WHERE pid=?", (pid,))
+        cnt = int(cur.fetchone()[0])
+        if cnt > 0:
+            return await q.edit_message_text("❌ Can't delete. Product has orders history.", reply_markup=kb_admin_prod_menu(pid))
+        cur.execute("DELETE FROM codes WHERE pid=?", (pid,))
+        cur.execute("DELETE FROM products WHERE pid=?", (pid,))
+        con.commit()
+        return await q.edit_message_text("✅ Product deleted.", reply_markup=kb_admin_prods(0))
+
+    # Codes home
+    if data == "ad:codes:home":
+        if not is_admin(update.effective_user.id):
+            return await q.edit_message_text("❌ Not allowed.")
+        return await q.edit_message_text("🔑 Codes / Stock", reply_markup=kb_admin_codes_home())
+
+    if data == "ad:codes:addtxt":
+        _ad_set(context, "codes_addtxt", {})
+        return await q.edit_message_text(
+            "➕ Add Codes (Text)\nSend:\n`pid | CODE1\\nCODE2...`\nExample:\n`12 | AAAA-1111\\nBBBB-2222`\n\n/cancel to stop",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_admin_back_home(),
+        )
+
+    if data == "ad:codes:upload":
+        # first ask PID by text input
+        _ad_set(context, "codes_upload_pid", {})
+        return await q.edit_message_text(
+            "📄 Upload codes .txt\nStep 1: Send PID number first.\n\n/cancel to stop",
+            reply_markup=kb_admin_back_home(),
+        )
+
+    if data == "ad:codes:del":
+        _ad_set(context, "codes_del", {})
+        return await q.edit_message_text(
+            "🧹 Delete Code (unused only)\nSend:\n`pid | code_text`\n\n/cancel to stop",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_admin_back_home(),
+        )
+
+    if data == "ad:codes:export":
+        _ad_set(context, "codes_export", {})
+        return await q.edit_message_text("📤 Export unused codes\nSend PID number:\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    # Orders
+    if data.startswith("ad:orders:"):
+        page = int(data.split(":")[2])
+        return await q.edit_message_text("📦 Orders (recent)", reply_markup=kb_admin_orders(page))
+
+    if data.startswith("ad:ord:menu:"):
+        oid = int(data.split(":")[3])
+        cur.execute("SELECT id,user_id,product_title,qty,total,status,created_at FROM orders WHERE id=?", (oid,))
+        row = cur.fetchone()
+        if not row:
+            return await q.edit_message_text("❌ Order not found.", reply_markup=kb_admin_back_home())
+        oid, uid, title, qty, total, status, created = row
+        return await q.edit_message_text(
+            f"📦 Order #{oid}\nUser: {uid}\nProduct: {title}\nQty: {qty}\nTotal: {float(total):.3f}\nStatus: {status}\nCreated: {created}",
+            reply_markup=kb_admin_order_menu(oid),
+        )
+
+    if data == "ad:ord:find":
+        _ad_set(context, "ord_find", {})
+        return await q.edit_message_text("🔎 Send order id:\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    if data == "ad:ord:resend":
+        _ad_set(context, "ord_resend", {})
+        return await q.edit_message_text("♻️ Resend delivery\nSend order id:\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    if data.startswith("ad:ord:cancel:"):
+        oid = int(data.split(":")[3])
+        cur.execute("SELECT user_id,total,status FROM orders WHERE id=?", (oid,))
+        row = cur.fetchone()
+        if not row:
+            return await q.edit_message_text("❌ Order not found.", reply_markup=kb_admin_back_home())
+        user_id, total, status = int(row[0]), float(row[1]), row[2]
+        if status == "COMPLETED":
+            return await q.edit_message_text("❌ Cannot cancel completed order.", reply_markup=kb_admin_order_menu(oid))
+        if status == "CANCELLED":
+            return await q.edit_message_text("❌ Already cancelled.", reply_markup=kb_admin_order_menu(oid))
+        add_balance(user_id, total)
+        cur.execute("UPDATE orders SET status='CANCELLED' WHERE id=?", (oid,))
+        con.commit()
+        await context.bot.send_message(user_id, f"❌ Order #{oid} cancelled.\nRefunded: +{money(total)}")
+        return await q.edit_message_text("✅ Cancelled + refunded.", reply_markup=kb_admin_orders(0))
+
+    if data.startswith("ad:ord:resendone:"):
+        oid = int(data.split(":")[3])
+        cur.execute("SELECT user_id, delivered_text FROM orders WHERE id=?", (oid,))
+        row = cur.fetchone()
+        if not row:
+            return await q.edit_message_text("❌ Not found.", reply_markup=kb_admin_back_home())
+        uid, delivered = row
+        codes = (delivered or "").splitlines()
+        await send_codes_delivery(chat_id=int(uid), context=context, order_id=oid, codes=codes)
+        return await q.edit_message_text("✅ Resent delivery.", reply_markup=kb_admin_order_menu(oid))
+
+    # Deposits
+    if data.startswith("ad:deps:"):
+        page = int(data.split(":")[2])
+        return await q.edit_message_text("💰 Deposits (pending)", reply_markup=kb_admin_deps(page))
+
+    if data.startswith("ad:dep:menu:"):
+        dep_id = int(data.split(":")[3])
+        cur.execute("SELECT id,user_id,method,note,txid,amount,status,created_at FROM deposits WHERE id=?", (dep_id,))
+        row = cur.fetchone()
+        if not row:
+            return await q.edit_message_text("❌ Deposit not found.", reply_markup=kb_admin_back_home())
+        dep_id, uid, method, note, txid, amount, status, created = row
+        return await q.edit_message_text(
+            f"💰 Deposit #{dep_id}\nUser: {uid}\nMethod: {method}\nAmount: {amount}\nStatus: {status}\nNote: {note}\nTXID: {txid}\nCreated: {created}",
+            reply_markup=kb_admin_dep_menu(dep_id),
+        )
+
+    if data == "ad:dep:find":
+        _ad_set(context, "dep_find", {})
+        return await q.edit_message_text("🔎 Send deposit id:\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    if data.startswith("ad:dep:approve:"):
+        dep_id = int(data.split(":")[3])
+        cur.execute("SELECT user_id, amount, status FROM deposits WHERE id=?", (dep_id,))
+        row = cur.fetchone()
+        if not row:
+            return await q.edit_message_text("❌ Deposit not found.", reply_markup=kb_admin_back_home())
+        user_id, amount, status = int(row[0]), row[1], row[2]
+        if status != "PENDING_REVIEW":
+            return await q.edit_message_text("❌ Not ready for approval (need PENDING_REVIEW).", reply_markup=kb_admin_dep_menu(dep_id))
+        if amount is None:
+            return await q.edit_message_text("❌ Amount missing.", reply_markup=kb_admin_dep_menu(dep_id))
+        cur.execute("UPDATE deposits SET status='APPROVED' WHERE id=?", (dep_id,))
+        con.commit()
+        add_balance(user_id, float(amount))
+        await context.bot.send_message(user_id, f"✅ Top up approved: +{money(float(amount))}")
+        return await q.edit_message_text(f"✅ Approved +{money(float(amount))}", reply_markup=kb_admin_deps(0))
+
+    if data.startswith("ad:dep:reject:"):
+        dep_id = int(data.split(":")[3])
+        cur.execute("SELECT user_id, status FROM deposits WHERE id=?", (dep_id,))
+        row = cur.fetchone()
+        if not row:
+            return await q.edit_message_text("❌ Deposit not found.", reply_markup=kb_admin_back_home())
+        user_id, status = int(row[0]), row[1]
+        if status not in ("PENDING_REVIEW", "WAITING_PAYMENT"):
+            return await q.edit_message_text("❌ Already processed.", reply_markup=kb_admin_dep_menu(dep_id))
+        cur.execute("UPDATE deposits SET status='REJECTED' WHERE id=?", (dep_id,))
+        con.commit()
+        await context.bot.send_message(user_id, f"❌ Top up #{dep_id} rejected. Contact support.")
+        return await q.edit_message_text("✅ Rejected.", reply_markup=kb_admin_deps(0))
+
+    # Users
+    if data == "ad:users:home":
+        return await q.edit_message_text("👤 Users", reply_markup=kb_admin_users_home())
+
+    if data == "ad:user:find":
+        _ad_set(context, "user_find", {})
+        return await q.edit_message_text("🔎 Send user_id:\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    if data == "ad:user:addbal":
+        _ad_set(context, "user_addbal", {})
+        return await q.edit_message_text("➕ Send: user_id | amount\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    if data == "ad:user:takebal":
+        _ad_set(context, "user_takebal", {})
+        return await q.edit_message_text("➖ Send: user_id | amount\n\n/cancel to stop", reply_markup=kb_admin_back_home())
+
+    # Stats
+    if data == "ad:stats":
+        users, orders_count, revenue, top = get_stats()
+        lines = [
+            "📊 Stats",
+            f"👤 Users: {users}",
+            f"✅ Completed Orders: {orders_count}",
+            f"💰 Revenue: {money(revenue)}",
+            "",
+            "🏆 Top Products:",
+        ]
+        if top:
+            for title, cnt, sm in top:
+                lines.append(f"- {title} | {int(cnt)} orders | {float(sm or 0):.3f}")
+        else:
+            lines.append("- (No data)")
+        return await q.edit_message_text("\n".join(lines), reply_markup=kb_admin_back_home())
+
+    # Special: codes upload PID step handled in admin_text_input
+    mode, tmp = _ad_get(context)
+    if mode == "codes_upload_pid":
+        # this happens via text input, not callback
+        pass
+
+    # =========================
+    # Navigation (Shop)
+    # =========================
     if data == "back:cats":
         return await show_categories(update, context)
 
@@ -1285,10 +2162,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(f"✅ Order created!\nOrder ID: {oid}\nTotal: {total:.3f} {CURRENCY}\nDelivering codes...")
         await send_codes_delivery(chat_id=uid, context=context, order_id=oid, codes=codes_list)
 
-        await context.bot.send_message(
-            ADMIN_ID,
-            f"✅ NEW COMPLETED ORDER\nOrder ID: {oid}\nUser: {uid}\nProduct: {title}\nQty: {qty}\nTotal: {total:.3f} {CURRENCY}",
-        )
+        for aid in ADMIN_IDS:
+            await context.bot.send_message(
+                aid,
+                f"✅ NEW COMPLETED ORDER\nOrder ID: {oid}\nUser: {uid}\nProduct: {title}\nQty: {qty}\nTotal: {total:.3f} {CURRENCY}",
+            )
         return
 
     # Orders pagination
@@ -1351,187 +2229,16 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_TOPUP_DETAILS
 
+    # default
+    return
+
 
 # =========================
-# Admin input
+# Special: codes upload PID step (handled in text input by checking mode)
 # =========================
-async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return ConversationHandler.END
-
-    mode = context.user_data.get(UD_ADMIN_MODE)
-    text = (update.message.text or "").strip()
-
-    if text.lower() in ("/cancel", "cancel"):
-        await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
-        return ConversationHandler.END
-
-    try:
-        if mode == "addcat":
-            cur.execute("INSERT OR IGNORE INTO categories(title) VALUES(?)", (text,))
-            con.commit()
-            await update.message.reply_text("✅ Category added.")
-            return ConversationHandler.END
-
-        if mode == "addprod":
-            m = re.match(r'^"(.+?)"\s*\|\s*"(.+?)"\s*\|\s*([\d.]+)\s*$', text)
-            if not m:
-                await update.message.reply_text('❌ Format invalid.\nExample:\n"CAT" | "TITLE" | 9.2')
-                return ConversationHandler.END
-            cat_title, prod_title, price_s = m.groups()
-            cur.execute("SELECT cid FROM categories WHERE title=?", (cat_title,))
-            row = cur.fetchone()
-            if not row:
-                await update.message.reply_text("❌ Category not found.")
-                return ConversationHandler.END
-            cid = int(row[0])
-            cur.execute(
-                "INSERT INTO products(cid,title,price,product_type,active) VALUES(?,?,?,'CODE',1)",
-                (cid, prod_title, float(price_s)),
-            )
-            con.commit()
-            await update.message.reply_text("✅ Product added.")
-            return ConversationHandler.END
-
-        if mode == "addcodes":
-            if "|" not in text:
-                await update.message.reply_text("❌ Missing '|'.\nExample:\n12 | CODE1\nCODE2")
-                return ConversationHandler.END
-            pid_s, codes_blob = [x.strip() for x in text.split("|", 1)]
-            pid = int(pid_s)
-            codes = [c.strip() for c in codes_blob.splitlines() if c.strip()]
-            if not codes:
-                await update.message.reply_text("❌ No codes.")
-                return ConversationHandler.END
-
-            added = 0
-            skipped = 0
-            for ctext in codes:
-                try:
-                    cur.execute("INSERT INTO codes(pid,code_text,used) VALUES(?,?,0)", (pid, ctext))
-                    added += 1
-                except sqlite3.IntegrityError:
-                    skipped += 1
-            con.commit()
-            await update.message.reply_text(f"✅ Added {added} codes to PID {pid}.\n♻️ Skipped duplicates: {skipped}")
-            return ConversationHandler.END
-
-        if mode == "setprice":
-            m = re.match(r"^(\d+)\s*\|\s*([\d.]+)$", text)
-            if not m:
-                await update.message.reply_text("❌ Format: pid | price\nExample: 12 | 9.5")
-                return ConversationHandler.END
-            pid, price = int(m.group(1)), float(m.group(2))
-            cur.execute("UPDATE products SET price=? WHERE pid=?", (price, pid))
-            con.commit()
-            await update.message.reply_text("✅ Price updated.")
-            return ConversationHandler.END
-
-        if mode == "toggle":
-            pid = int(text)
-            cur.execute("SELECT active FROM products WHERE pid=?", (pid,))
-            row = cur.fetchone()
-            if not row:
-                await update.message.reply_text("❌ Product not found.")
-                return ConversationHandler.END
-            active = int(row[0])
-            newv = 0 if active else 1
-            cur.execute("UPDATE products SET active=? WHERE pid=?", (newv, pid))
-            con.commit()
-            await update.message.reply_text(f"✅ Product {'enabled' if newv else 'disabled'}.")
-            return ConversationHandler.END
-
-        if mode == "cancelorder":
-            oid = int(text)
-            cur.execute("SELECT user_id,total,status FROM orders WHERE id=?", (oid,))
-            row = cur.fetchone()
-            if not row:
-                await update.message.reply_text("❌ Order not found.")
-                return ConversationHandler.END
-            user_id, total, status = int(row[0]), float(row[1]), row[2]
-            if status == "COMPLETED":
-                await update.message.reply_text("❌ Cannot cancel completed order.")
-                return ConversationHandler.END
-            if status == "CANCELLED":
-                await update.message.reply_text("❌ Already cancelled.")
-                return ConversationHandler.END
-            add_balance(user_id, total)
-            cur.execute("UPDATE orders SET status='CANCELLED' WHERE id=?", (oid,))
-            con.commit()
-            await update.message.reply_text(f"✅ Order #{oid} cancelled + refunded.")
-            await context.bot.send_message(user_id, f"❌ Order #{oid} cancelled.\nRefunded: +{money(total)}")
-            return ConversationHandler.END
-
-        if mode == "approvedep":
-            dep_id = int(text)
-            cur.execute("SELECT user_id, amount, status FROM deposits WHERE id=?", (dep_id,))
-            row = cur.fetchone()
-            if not row:
-                await update.message.reply_text("❌ Deposit not found.")
-                return ConversationHandler.END
-            user_id, amount, status = int(row[0]), row[1], row[2]
-            if status != "PENDING_REVIEW":
-                await update.message.reply_text("❌ Deposit not ready for approval.")
-                return ConversationHandler.END
-            if amount is None:
-                await update.message.reply_text("❌ Amount missing.")
-                return ConversationHandler.END
-            cur.execute("UPDATE deposits SET status='APPROVED' WHERE id=?", (dep_id,))
-            con.commit()
-            add_balance(user_id, float(amount))
-            await update.message.reply_text(f"✅ Deposit #{dep_id} approved. +{money(float(amount))}")
-            await context.bot.send_message(user_id, f"✅ Top up approved: +{money(float(amount))}")
-            return ConversationHandler.END
-
-        if mode == "rejectdep":
-            dep_id = int(text)
-            cur.execute("SELECT user_id, status FROM deposits WHERE id=?", (dep_id,))
-            row = cur.fetchone()
-            if not row:
-                await update.message.reply_text("❌ Deposit not found.")
-                return ConversationHandler.END
-            user_id, status = int(row[0]), row[1]
-            if status not in ("PENDING_REVIEW", "WAITING_PAYMENT"):
-                await update.message.reply_text("❌ Deposit already processed.")
-                return ConversationHandler.END
-            cur.execute("UPDATE deposits SET status='REJECTED' WHERE id=?", (dep_id,))
-            con.commit()
-            await update.message.reply_text(f"✅ Deposit #{dep_id} rejected.")
-            await context.bot.send_message(user_id, f"❌ Top up #{dep_id} rejected. Contact support.")
-            return ConversationHandler.END
-
-        if mode == "addbal":
-            m = re.match(r"^(\d+)\s*\|\s*([\d.]+)$", text)
-            if not m:
-                await update.message.reply_text("❌ Format: user_id | amount\nExample: 1997968014 | 5")
-                return ConversationHandler.END
-            user_id, amount = int(m.group(1)), float(m.group(2))
-            add_balance(user_id, amount)
-            await update.message.reply_text(f"✅ Added +{money(amount)} to {user_id}")
-            await context.bot.send_message(user_id, f"✅ Admin added balance: +{money(amount)}")
-            return ConversationHandler.END
-
-        if mode == "takebal":
-            m = re.match(r"^(\d+)\s*\|\s*([\d.]+)$", text)
-            if not m:
-                await update.message.reply_text("❌ Format: user_id | amount\nExample: 1997968014 | 5")
-                return ConversationHandler.END
-            user_id, amount = int(m.group(1)), float(m.group(2))
-            if not charge_balance(user_id, amount):
-                bal = get_balance(user_id)
-                await update.message.reply_text(f"❌ User has insufficient balance. User balance: {bal:.3f} {CURRENCY}")
-                return ConversationHandler.END
-            add_balance(ADMIN_ID, amount)
-            await update.message.reply_text(f"✅ Took {money(amount)} from {user_id} → added to Admin.")
-            await context.bot.send_message(user_id, f"➖ Admin deducted: -{money(amount)}")
-            return ConversationHandler.END
-
-        await update.message.reply_text("✅ Done.")
-        return ConversationHandler.END
-
-    except Exception as e:
-        await update.message.reply_text(f"❌ Error: {e}")
-        raise  # let error handler log it
+async def admin_pid_step_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # This handler is merged into admin_text_input by switching mode.
+    return ConversationHandler.END
 
 
 # =========================
@@ -1540,47 +2247,36 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return await update.message.reply_text("❌ Not allowed.")
-    await update.message.reply_text("👑 Admin Panel", reply_markup=kb_admin_panel())
-
-
-async def approvedep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    if not context.args:
-        return await update.message.reply_text("Usage: /approvedep <deposit_id>")
-    context.user_data[UD_ADMIN_MODE] = "approvedep"
-    update.message.text = context.args[0]
-    return await admin_input(update, context)
-
-
-async def rejectdep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    if not context.args:
-        return await update.message.reply_text("Usage: /rejectdep <deposit_id>")
-    context.user_data[UD_ADMIN_MODE] = "rejectdep"
-    update.message.text = context.args[0]
-    return await admin_input(update, context)
+    await update.message.reply_text("👑 Admin Panel", reply_markup=kb_admin_home())
 
 
 # =========================
-# Error Handler
+# Extra: small bridge in admin_text_input for upload PID step
 # =========================
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
-    err = context.error
-    tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
-    logger.error("Unhandled error: %s\n%s", err, tb)
+async def admin_text_bridge(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
 
-    # حاول ترسل للأدمن (بدون ما تفشل لو ما ينفع)
-    try:
-        short_tb = tb[-3500:]  # لا نتجاوز حد تيليجرام
-        await context.bot.send_message(
-            chat_id=ADMIN_ID,
-            text=f"❌ Bot Error\n\n`{str(err)}`\n\n```{short_tb}```",
-            parse_mode=ParseMode.MARKDOWN,
-        )
-    except Exception:
-        pass
+    mode, tmp = _ad_get(context)
+    txt = (update.message.text or "").strip()
+
+    if mode == "codes_upload_pid":
+        if txt.lower() in ("/cancel", "cancel"):
+            _ad_set(context, "", {})
+            await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+        try:
+            pid = int(txt)
+        except ValueError:
+            await update.message.reply_text("❌ Send PID as a number.\n/cancel to stop", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+
+        _ad_set(context, "codes_upload", {"pid": pid})
+        await update.message.reply_text("✅ Now send the .txt file (each code on new line).", reply_markup=REPLY_MENU)
+        return ST_ADMIN_DOC
+
+    # otherwise proceed normal admin_text_input
+    return await admin_text_input(update, context)
 
 
 # =========================
@@ -1589,54 +2285,40 @@ async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
 def build_app():
     app = ApplicationBuilder().token(TOKEN).build()
 
-    # ✅ Conversation فقط للـCallbacks اللي تفتح states + إدخال نصوص الحالات
+    # Conversations
     conv = ConversationHandler(
-        entry_points=[
-            CallbackQueryHandler(
-                on_callback,
-                pattern=r"^(buy:|paid:|admin:|manual:shahid:|manual:ff:checkout)",
-            )
-        ],
+        entry_points=[CallbackQueryHandler(on_callback)],
         states={
             ST_QTY: [MessageHandler(filters.TEXT, qty_input)],
             ST_TOPUP_DETAILS: [MessageHandler(filters.TEXT, topup_details_input)],
-            ST_ADMIN_INPUT: [MessageHandler(filters.TEXT, admin_input)],
             ST_MANUAL_EMAIL: [MessageHandler(filters.TEXT, manual_email_input)],
             ST_MANUAL_PASS: [MessageHandler(filters.TEXT, manual_pass_input)],
             ST_FF_PLAYERID: [MessageHandler(filters.TEXT, ff_playerid_input)],
+
+            # Admin text/doc flows
+            ST_ADMIN_TEXT: [MessageHandler(filters.TEXT, admin_text_bridge)],
+            ST_ADMIN_DOC: [MessageHandler(filters.Document.ALL, admin_doc_input)],
         },
-        fallbacks=[
-            CommandHandler("cancel", cancel_cmd),
-            CommandHandler("start", start_cmd),
-        ],
+        fallbacks=[CommandHandler("start", start_cmd)],
         allow_reentry=True,
     )
 
     # Commands first
     app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
-    app.add_handler(CommandHandler("approvedep", approvedep_cmd))
-    app.add_handler(CommandHandler("rejectdep", rejectdep_cmd))
 
-    # Conversation next
+    # Conversation
     app.add_handler(conv)
-
-    # ✅ Callback عام لكل الأزرار الأخرى (cat/view/confirm/pay/orders/..)
-    app.add_handler(CallbackQueryHandler(on_callback))
 
     # Menu last
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router))
-
-    # ✅ Error handler
-    app.add_error_handler(on_error)
 
     return app
 
 
 def main():
     app = build_app()
-    app.run_polling(allowed_updates=Update.ALL_TYPES)
+    app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
 
 
 if __name__ == "__main__":
