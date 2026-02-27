@@ -1094,13 +1094,19 @@ async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=REPLY_MENU,
     )
 
-    await context.bot.send_message(
-        ADMIN_ID,
-        f"⚡ MANUAL ORDER (FREE FIRE MENA)\n"
-        f"Manual ID: {mid}\nUser: {uid}\nPlayer ID: {player_id}\n"
-        f"Total Diamonds: {total_diamonds}\nTotal: {total_price:.3f} {CURRENCY}\n\n"
+  await context.bot.send_message(
+    ADMIN_ID,
+    (
+        "⚡ MANUAL ORDER (FREE FIRE MENA)\n"
+        f"Manual ID: {mid}\n"
+        f"User ID: `{uid}`\n"
+        f"Player ID: `{player_id}`\n"
+        f"Total Diamonds: {total_diamonds}\n"
+        f"Total: {total_price:.3f} {CURRENCY}\n\n"
         f"Cart:\n{note}"
-    )
+    ),
+    parse_mode=ParseMode.MARKDOWN,
+)
 
     context.user_data.pop(UD_FF_CART, None)
     context.user_data.pop(UD_FF_TOTAL, None)
