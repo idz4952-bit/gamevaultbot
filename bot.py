@@ -41,8 +41,7 @@ logger = logging.getLogger("shopbot")
 # =========================
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
-DB_PATH = os.getenv("DB_PATH", "shop.db")
-
+DB_PATH = os.getenv("DB_PATH", "/var/data/shop.db")
 CURRENCY = os.getenv("CURRENCY", "$")
 
 BINANCE_UID = os.getenv("BINANCE_ID", "YOUR_BINANCE_ID_ADDRESS")
