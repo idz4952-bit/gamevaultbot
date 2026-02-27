@@ -2016,11 +2016,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # Admin input (text + file)
 # =========================
-async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+aasync def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return ConversationHandler.END
 
     mode = context.user_data.get(UD_ADMIN_MODE)
+
+    # ✅ FIX: allow menu buttons while in admin mode
+    if update.message and update.message.text:
+        t = update.message.text.strip()
+
+        if t in MENU_BUTTONS:
+            context.user_data.pop(UD_ADMIN_MODE, None)
+            context.user_data.pop(UD_ADMIN_CODES_PID, None)
+            context.user_data.pop(UD_ADMIN_MANUAL_ID, None)
+
+            await menu_router(update, context)
+            return ConversationHandler.END
 
     # cancel
     if update.message and update.message.text:
