@@ -63,6 +63,7 @@ HIDDEN_CATEGORIES = {
     "🎲 YALLA LUDO",
     "🕹 ROBLOX (USA)",
     "🟦 STEAM (USA)",
+    "🛒 Our Products",
 }
 
 if not TOKEN:
