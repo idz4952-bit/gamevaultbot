@@ -2016,7 +2016,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 # Admin input (text + file)
 # =========================
-aasync def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         return ConversationHandler.END
 
