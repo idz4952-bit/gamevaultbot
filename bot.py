@@ -1083,24 +1083,24 @@ async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     con.commit()
     mid = cur.lastrowid
 
-    await update.message.reply_text(
+        await update.message.reply_text(
         f"✅ Manual order created!\n"
         f"Service: Free Fire (MENA)\n"
         f"Order ID: {mid}\n"
         f"Player ID: {player_id}\n"
         f"Total Diamonds: {total_diamonds}\n"
-        f"Paid: {total_price:.3f} {CURRENCY}\n\n"
+        f"Paid: {total_price:.3f} {CURRENCY}\n"
         f"We will process it soon ✅",
         reply_markup=REPLY_MENU,
     )
 
-        await context.bot.send_message(
+    await context.bot.send_message(
         ADMIN_ID,
         (
             "⚡ MANUAL ORDER (FREE FIRE MENA)\n"
             f"Manual ID: {mid}\n"
-            f"User ID: `{uid}`\n"
-            f"Player ID: `{player_id}`\n"
+            f"User ID:\n`{uid}`\n"
+            f"Player ID:\n`{player_id}`\n"
             f"Total Diamonds: {total_diamonds}\n"
             f"Total: {total_price:.3f} {CURRENCY}\n\n"
             f"Cart:\n{note}"
