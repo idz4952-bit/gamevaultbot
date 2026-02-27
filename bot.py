@@ -4,6 +4,8 @@ import re
 import io
 import sqlite3
 import secrets
+import logging
+import traceback
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple, Dict
 
@@ -26,6 +28,15 @@ from telegram.ext import (
 )
 
 # =========================
+# Logging
+# =========================
+logging.basicConfig(
+    level=os.getenv("LOG_LEVEL", "INFO").upper(),
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+logger = logging.getLogger("shopbot")
+
+# =========================
 # ENV
 # =========================
 TOKEN = os.getenv("TOKEN")
@@ -43,7 +54,7 @@ SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+213xxxxxxxxx")
 SUPPORT_GROUP = os.getenv("SUPPORT_GROUP", "@yourgroup")
 SUPPORT_CHANNEL = os.getenv("SUPPORT_CHANNEL", "@yourchannel")
 
-# اخفاء اقسام (حسب الدوائر الحمراء)
+# اخفاء اقسام
 HIDDEN_CATEGORIES = {
     "🎲 YALLA LUDO",
     "🕹 ROBLOX (USA)",
@@ -195,21 +206,15 @@ DEFAULT_CATEGORIES = [
     "🪂 PUBG MOBILE UC VOUCHERS",
     "💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)",
     "🎮 PLAYSTATION USA GIFTCARDS",
-    # مخفي:
-    # "🎲 YALLA LUDO",
-    # "🕹 ROBLOX (USA)",
-    # "🟦 STEAM (USA)",
 ]
 
 DEFAULT_PRODUCTS = [
-    # Free Fire (OFFICIAL PINS)
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "1 USD 💎 PINS 100+10", 0.920),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "2 USD 💎 PINS 210+21", 1.840),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "5 USD 💎 PINS 530+53", 4.600),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "10 USD 💎 PINS 1080+108", 9.200),
     ("💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)", "20 USD 💎 PINS 2200+220", 18.400),
 
-    # PUBG
     ("🪂 PUBG MOBILE UC VOUCHERS", "60 UC", 0.875),
     ("🪂 PUBG MOBILE UC VOUCHERS", "325 UC", 4.375),
     ("🪂 PUBG MOBILE UC VOUCHERS", "660 UC", 8.750),
@@ -217,15 +222,13 @@ DEFAULT_PRODUCTS = [
     ("🪂 PUBG MOBILE UC VOUCHERS", "3850 UC", 44.000),
     ("🪂 PUBG MOBILE UC VOUCHERS", "8100 UC", 88.000),
 
-    # iTunes
     ("🍎 ITUNES GIFTCARD (USA)", "5$ iTunes US", 4.600),
     ("🍎 ITUNES GIFTCARD (USA)", "10$ iTunes US", 9.200),
     ("🍎 ITUNES GIFTCARD (USA)", "20$ iTunes US", 18.400),
     ("🍎 ITUNES GIFTCARD (USA)", "25$ iTunes US", 23.000),
     ("🍎 ITUNES GIFTCARD (USA)", "50$ iTunes US", 46.000),
-    ("🍎 ITUNES GIFTCARD (USA)", "100$ iTunes US", 92.000),  # ✅
+    ("🍎 ITUNES GIFTCARD (USA)", "100$ iTunes US", 92.000),
 
-    # PlayStation
     ("🎮 PLAYSTATION USA GIFTCARDS", "10$ PSN USA", 8.900),
     ("🎮 PLAYSTATION USA GIFTCARDS", "25$ PSN USA", 22.000),
     ("🎮 PLAYSTATION USA GIFTCARDS", "50$ PSN USA", 44.000),
@@ -395,7 +398,7 @@ async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, 
 # =========================
 # Keyboards
 # =========================
-def kb_categories() -> InlineKeyboardMarkup:
+def kb_categories(is_admin_user: bool = False) -> InlineKeyboardMarkup:
     cur.execute(
         """
         SELECT c.cid, c.title, COUNT(p.pid)
@@ -410,7 +413,11 @@ def kb_categories() -> InlineKeyboardMarkup:
         if title in HIDDEN_CATEGORIES:
             continue
         rows.append([InlineKeyboardButton(f"{title} | {cnt}", callback_data=f"cat:{cid}")])
-    rows.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin:panel")])
+
+    # ✅ إظهار زر الأدمن فقط للأدمن
+    if is_admin_user:
+        rows.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin:panel")])
+
     return InlineKeyboardMarkup(rows)
 
 
@@ -458,9 +465,7 @@ def kb_balance_methods() -> InlineKeyboardMarkup:
 
 
 def kb_have_paid(dep_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [[InlineKeyboardButton("✅ I Have Paid", callback_data=f"paid:{dep_id}")]]
-    )
+    return InlineKeyboardMarkup([[InlineKeyboardButton("✅ I Have Paid", callback_data=f"paid:{dep_id}")]])
 
 
 def kb_topup_now() -> InlineKeyboardMarkup:
@@ -638,12 +643,21 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Bot is online!", reply_markup=REPLY_MENU)
 
 
+async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # ✅ /cancel يعمل في أي وقت
+    context.user_data.clear()
+    if update.message:
+        await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
+    return ConversationHandler.END
+
+
 async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🛒 Here are our product categories!\nSelect a category to explore our offerings"
+    kb = kb_categories(is_admin(update.effective_user.id))
     if update.message:
-        await update.message.reply_text(text, reply_markup=kb_categories())
+        await update.message.reply_text(text, reply_markup=kb)
     else:
-        await update.callback_query.edit_message_text(text, reply_markup=kb_categories())
+        await update.callback_query.edit_message_text(text, reply_markup=kb)
 
 
 async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -954,7 +968,7 @@ async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Manual: FreeFire PlayerID (Digits Only + /cancel works)
+# Manual: FreeFire PlayerID
 # =========================
 async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
@@ -1042,15 +1056,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "noop":
         return
 
-    # goto topup
     if data == "goto:topup":
         return await show_balance(update, context)
 
-    # Manual navigation
     if data == "manual:back" or data == "manual:services":
         return await q.edit_message_text("⚡ MANUAL ORDER\nSelect a service:", reply_markup=kb_manual_services())
 
-    # Manual Shahid
     if data == "manual:shahid":
         text = (
             "📺 Shahid — Select a product:\n\n"
@@ -1090,7 +1101,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_MANUAL_EMAIL
 
-    # Manual FreeFire
     if data == "manual:ff":
         return await q.edit_message_text(ff_menu_text(), reply_markup=kb_ff_menu(context))
 
@@ -1150,7 +1160,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             rows = cur.fetchall()
             if not rows:
                 return await q.edit_message_text("No products.")
-            lines = [f"PID {pid} | {cat} | {title} | {price}$ | {'ON' if act else 'OFF'}" for pid, cat, title, price, act in rows]
+            lines = [
+                f"PID {pid} | {cat} | {title} | {price}$ | {'ON' if act else 'OFF'}"
+                for pid, cat, title, price, act in rows
+            ]
             text = "\n".join(lines)
             if len(text) > 3800:
                 text = text[:3800] + "\n..."
@@ -1350,7 +1363,6 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = context.user_data.get(UD_ADMIN_MODE)
     text = (update.message.text or "").strip()
 
-    # allow /cancel here too
     if text.lower() in ("/cancel", "cancel"):
         await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
         return ConversationHandler.END
@@ -1365,7 +1377,7 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode == "addprod":
             m = re.match(r'^"(.+?)"\s*\|\s*"(.+?)"\s*\|\s*([\d.]+)\s*$', text)
             if not m:
-                await update.message.reply_text("❌ Format invalid.\nExample:\n\"CAT\" | \"TITLE\" | 9.2")
+                await update.message.reply_text('❌ Format invalid.\nExample:\n"CAT" | "TITLE" | 9.2')
                 return ConversationHandler.END
             cat_title, prod_title, price_s = m.groups()
             cur.execute("SELECT cid FROM categories WHERE title=?", (cat_title,))
@@ -1520,7 +1532,7 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
-        return ConversationHandler.END
+        raise  # let error handler log it
 
 
 # =========================
@@ -1553,15 +1565,40 @@ async def rejectdep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
+# Error Handler
+# =========================
+async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    err = context.error
+    tb = "".join(traceback.format_exception(type(err), err, err.__traceback__))
+    logger.error("Unhandled error: %s\n%s", err, tb)
+
+    # حاول ترسل للأدمن (بدون ما تفشل لو ما ينفع)
+    try:
+        short_tb = tb[-3500:]  # لا نتجاوز حد تيليجرام
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"❌ Bot Error\n\n`{str(err)}`\n\n```{short_tb}```",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+    except Exception:
+        pass
+
+
+# =========================
 # Main
 # =========================
 def build_app():
     app = ApplicationBuilder().token(TOKEN).build()
 
+    # ✅ Conversation فقط للـCallbacks اللي تفتح states + إدخال نصوص الحالات
     conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(on_callback)],
+        entry_points=[
+            CallbackQueryHandler(
+                on_callback,
+                pattern=r"^(buy:|paid:|admin:|manual:shahid:|manual:ff:checkout)",
+            )
+        ],
         states={
-            # ✅ filters.TEXT (حتى /cancel يوصل)
             ST_QTY: [MessageHandler(filters.TEXT, qty_input)],
             ST_TOPUP_DETAILS: [MessageHandler(filters.TEXT, topup_details_input)],
             ST_ADMIN_INPUT: [MessageHandler(filters.TEXT, admin_input)],
@@ -1569,12 +1606,16 @@ def build_app():
             ST_MANUAL_PASS: [MessageHandler(filters.TEXT, manual_pass_input)],
             ST_FF_PLAYERID: [MessageHandler(filters.TEXT, ff_playerid_input)],
         },
-        fallbacks=[CommandHandler("start", start_cmd)],
+        fallbacks=[
+            CommandHandler("cancel", cancel_cmd),
+            CommandHandler("start", start_cmd),
+        ],
         allow_reentry=True,
     )
 
     # Commands first
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("approvedep", approvedep_cmd))
     app.add_handler(CommandHandler("rejectdep", rejectdep_cmd))
@@ -1582,8 +1623,14 @@ def build_app():
     # Conversation next
     app.add_handler(conv)
 
+    # ✅ Callback عام لكل الأزرار الأخرى (cat/view/confirm/pay/orders/..)
+    app.add_handler(CallbackQueryHandler(on_callback))
+
     # Menu last
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router))
+
+    # ✅ Error handler
+    app.add_error_handler(on_error)
 
     return app
 
