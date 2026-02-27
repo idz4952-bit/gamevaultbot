@@ -4,7 +4,6 @@ import re
 import io
 import sqlite3
 import secrets
-import logging
 from datetime import datetime, timedelta
 from typing import Optional, List, Tuple, Dict
 
@@ -27,24 +26,13 @@ from telegram.ext import (
 )
 
 # =========================
-# LOGGING
-# =========================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-logger = logging.getLogger(__name__)
-
-# =========================
 # ENV
 # =========================
 TOKEN = os.getenv("TOKEN")
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# ✅ Disk mount path on Render (Recommended): /var/data
-# If you attached a Disk, keep DB_PATH under mount path.
-DEFAULT_DB_PATH = "/var/data/shop.db"
-DB_PATH = os.getenv("DB_PATH", DEFAULT_DB_PATH)
+# ✅ IMPORTANT: for Render Disk use /var/data/shop.db
+DB_PATH = os.getenv("DB_PATH", "/var/data/shop.db")
 
 CURRENCY = os.getenv("CURRENCY", "$")
 
@@ -68,6 +56,18 @@ if not TOKEN:
     raise RuntimeError("TOKEN env var is missing")
 if ADMIN_ID == 0:
     raise RuntimeError("ADMIN_ID env var is missing or 0")
+
+
+def ensure_db_dir(path: str):
+    # ✅ fix: sqlite unable to open database file
+    # Create parent dir if DB_PATH contains a directory.
+    p = os.path.abspath(path)
+    parent = os.path.dirname(p)
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+
+
+ensure_db_dir(DB_PATH)
 
 
 def is_admin(uid: int) -> bool:
@@ -99,18 +99,8 @@ def extract_sort_value(title: str) -> float:
 
 
 # =========================
-# DB (✅ ensure directory exists)
+# DB
 # =========================
-def _ensure_db_dir(db_path: str):
-    # if db_path is relative like "shop.db" -> create in current dir (ok)
-    # if absolute path -> ensure parent exists
-    parent = os.path.dirname(db_path)
-    if parent and parent != ".":
-        os.makedirs(parent, exist_ok=True)
-
-
-_ensure_db_dir(DB_PATH)
-
 con = sqlite3.connect(DB_PATH, check_same_thread=False)
 cur = con.cursor()
 
@@ -209,7 +199,6 @@ def ensure_schema():
 
 
 ensure_schema()
-
 
 # =========================
 # SEED
@@ -521,20 +510,88 @@ def kb_support() -> InlineKeyboardMarkup:
     )
 
 
+# =========================
+# ✅ Admin Panel (Professional Home + Sub Menus)
+# =========================
 def kb_admin_panel() -> InlineKeyboardMarkup:
+    # ✅ Admin Home (Professional Grid)
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📁 Categories", callback_data="ap:cats"),
+                InlineKeyboardButton("🧩 Products", callback_data="ap:prods"),
+            ],
+            [
+                InlineKeyboardButton("🔑 Codes / Stock", callback_data="ap:codes"),
+                InlineKeyboardButton("📦 Orders", callback_data="ap:orders"),
+            ],
+            [
+                InlineKeyboardButton("💰 Deposits", callback_data="ap:deps"),
+                InlineKeyboardButton("👤 Users", callback_data="ap:users"),
+            ],
+            [
+                InlineKeyboardButton("📊 Stats", callback_data="ap:stats"),
+                InlineKeyboardButton("⬅️ Back", callback_data="back:cats"),
+            ],
+        ]
+    )
+
+
+def kb_ap_categories() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat")],
+            [InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")],
+        ]
+    )
+
+
+def kb_ap_products() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📋 List Products (PID)", callback_data="admin:listprod")],
-            [InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat")],
             [InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod")],
-            [InlineKeyboardButton("➕ Add Codes (stock)", callback_data="admin:addcodes")],
             [InlineKeyboardButton("💲 Set Price", callback_data="admin:setprice")],
             [InlineKeyboardButton("⛔ Toggle Product", callback_data="admin:toggle")],
+            [InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")],
+        ]
+    )
+
+
+def kb_ap_codes() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("➕ Add Codes (Text)", callback_data="admin:addcodes")],
+            [InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")],
+        ]
+    )
+
+
+def kb_ap_orders() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
             [InlineKeyboardButton("❌ Cancel Order (refund)", callback_data="admin:cancelorder")],
-            [InlineKeyboardButton("💰 Approve Deposit", callback_data="admin:approvedep")],
+            [InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")],
+        ]
+    )
+
+
+def kb_ap_deposits() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("✅ Approve Deposit", callback_data="admin:approvedep")],
             [InlineKeyboardButton("🚫 Reject Deposit", callback_data="admin:rejectdep")],
+            [InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")],
+        ]
+    )
+
+
+def kb_ap_users() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
             [InlineKeyboardButton("➕ Add Balance to User", callback_data="admin:addbal")],
             [InlineKeyboardButton("➖ Take Balance (to Admin)", callback_data="admin:takebal")],
+            [InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")],
         ]
     )
 
@@ -709,7 +766,7 @@ def _format_orders_page(rows: List[Tuple], page: int, page_size: int = 4) -> Tup
     total = len(rows)
     total_pages = max(1, (total + page_size - 1) // page_size)
     page = max(0, min(page, total_pages - 1))
-    chunk = rows[page * page_size: (page + 1) * page_size]
+    chunk = rows[page * page_size : (page + 1) * page_size]
 
     if not chunk:
         return ("📦 No orders found for this period.", 1)
@@ -723,7 +780,7 @@ def _format_orders_page(rows: List[Tuple], page: int, page_size: int = 4) -> Tup
             f"💰 Total Price: {float(total_price):.3f} {CURRENCY}\n"
             f"🕒 {created_at}\n"
         )
-    footer = f"{page + 1}/{total_pages}"
+    footer = f"{page+1}/{total_pages}"
     return ("\n".join(lines) + f"\n{footer}", total_pages)
 
 
@@ -974,7 +1031,7 @@ async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Manual: FreeFire PlayerID (Digits Only + /cancel works)
+# Manual: FreeFire PlayerID
 # =========================
 async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
@@ -1066,6 +1123,59 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "goto:topup":
         return await show_balance(update, context)
 
+    # ✅ Admin Home (Professional) routes
+    if data.startswith("ap:"):
+        if not is_admin(update.effective_user.id):
+            return await q.edit_message_text("❌ Not allowed.")
+
+        if data == "ap:home":
+            return await q.edit_message_text("👑 Admin Panel", reply_markup=kb_admin_panel())
+
+        if data == "ap:cats":
+            return await q.edit_message_text("📁 Categories", reply_markup=kb_ap_categories())
+
+        if data == "ap:prods":
+            return await q.edit_message_text("🧩 Products", reply_markup=kb_ap_products())
+
+        if data == "ap:codes":
+            return await q.edit_message_text("🔑 Codes / Stock", reply_markup=kb_ap_codes())
+
+        if data == "ap:orders":
+            return await q.edit_message_text("📦 Orders", reply_markup=kb_ap_orders())
+
+        if data == "ap:deps":
+            return await q.edit_message_text("💰 Deposits", reply_markup=kb_ap_deposits())
+
+        if data == "ap:users":
+            return await q.edit_message_text("👤 Users", reply_markup=kb_ap_users())
+
+        if data == "ap:stats":
+            cur.execute("SELECT COUNT(*) FROM users")
+            users_cnt = int(cur.fetchone()[0])
+
+            cur.execute("SELECT COUNT(*) FROM orders")
+            orders_cnt = int(cur.fetchone()[0])
+
+            cur.execute("SELECT COUNT(*) FROM orders WHERE status='COMPLETED'")
+            completed_cnt = int(cur.fetchone()[0])
+
+            cur.execute("SELECT COALESCE(SUM(total),0) FROM orders WHERE status='COMPLETED'")
+            revenue = float(cur.fetchone()[0])
+
+            text = (
+                "📊 Stats\n\n"
+                f"👤 Users: {users_cnt}\n"
+                f"📦 Orders: {orders_cnt}\n"
+                f"✅ Completed: {completed_cnt}\n"
+                f"💰 Revenue: {revenue:.3f} {CURRENCY}\n"
+            )
+            return await q.edit_message_text(
+                text,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]])
+            )
+
+        return
+
     # Manual navigation
     if data == "manual:back" or data == "manual:services":
         return await q.edit_message_text("⚡ MANUAL ORDER\nSelect a service:", reply_markup=kb_manual_services())
@@ -1147,12 +1257,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text(ff_checkout_text(context))
         return ST_FF_PLAYERID
 
-    # Admin panel
+    # Admin panel open
     if data == "admin:panel":
         if not is_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
         return await q.edit_message_text("👑 Admin Panel", reply_markup=kb_admin_panel())
 
+    # Admin actions (old system, reused)
     if data.startswith("admin:"):
         if not is_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
@@ -1174,21 +1285,23 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "\n".join(lines)
             if len(text) > 3800:
                 text = text[:3800] + "\n..."
-            return await q.edit_message_text(text)
+            return await q.edit_message_text(text, reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]]
+            ))
 
         prompts = {
-            "addcat": 'Send category title:\nExample: 🪂 PUBG MOBILE UC VOUCHERS',
-            "addprod": 'Send product:\nFormat: "Category Title" | "Product Title" | price\nExample:\n"🍎 ITUNES GIFTCARD (USA)" | "10$ iTunes US" | 9.2',
-            "addcodes": 'Send codes:\nFormat: pid | code1\\ncode2\\n...\nExample:\n12 | ABCD-1234\nEFGH-5678',
-            "setprice": 'Send: pid | new_price\nExample: 12 | 9.5',
-            "toggle": 'Send: pid (toggle ON/OFF)\nExample: 12',
-            "cancelorder": 'Send: order_id (refund)\nExample: 55',
-            "approvedep": 'Send: deposit_id\nExample: 10',
-            "rejectdep": 'Send: deposit_id\nExample: 10',
-            "addbal": 'Send: user_id | amount\nExample: 1997968014 | 5',
-            "takebal": 'Send: user_id | amount\nExample: 1997968014 | 5',
+            "addcat": 'Send category title:\nExample: 🪂 PUBG MOBILE UC VOUCHERS\n\n/cancel to stop',
+            "addprod": 'Send product:\nFormat: "Category Title" | "Product Title" | price\nExample:\n"🍎 ITUNES GIFTCARD (USA)" | "10$ iTunes US" | 9.2\n\n/cancel to stop',
+            "addcodes": 'Send codes:\nFormat: pid | code1\\ncode2\\n...\nExample:\n12 | ABCD-1234\nEFGH-5678\n\n/cancel to stop',
+            "setprice": 'Send: pid | new_price\nExample: 12 | 9.5\n\n/cancel to stop',
+            "toggle": 'Send: pid (toggle ON/OFF)\nExample: 12\n\n/cancel to stop',
+            "cancelorder": 'Send: order_id (refund)\nExample: 55\n\n/cancel to stop',
+            "approvedep": 'Send: deposit_id\nExample: 10\n\n/cancel to stop',
+            "rejectdep": 'Send: deposit_id\nExample: 10\n\n/cancel to stop',
+            "addbal": 'Send: user_id | amount\nExample: 1997968014 | 5\n\n/cancel to stop',
+            "takebal": 'Send: user_id | amount\nExample: 1997968014 | 5\n\n/cancel to stop',
         }
-        await q.edit_message_text(prompts.get(mode, "Send input now..."))
+        await q.edit_message_text(prompts.get(mode, "Send input now...\n\n/cancel to stop"))
         return ST_ADMIN_INPUT
 
     # Navigation
@@ -1370,7 +1483,6 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mode = context.user_data.get(UD_ADMIN_MODE)
     text = (update.message.text or "").strip()
 
-    # allow /cancel here too
     if text.lower() in ("/cancel", "cancel"):
         await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
         return ConversationHandler.END
@@ -1379,7 +1491,9 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if mode == "addcat":
             cur.execute("INSERT OR IGNORE INTO categories(title) VALUES(?)", (text,))
             con.commit()
-            await update.message.reply_text("✅ Category added.")
+            await update.message.reply_text("✅ Category added.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]]
+            ))
             return ConversationHandler.END
 
         if mode == "addprod":
@@ -1399,7 +1513,9 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 (cid, prod_title, float(price_s)),
             )
             con.commit()
-            await update.message.reply_text("✅ Product added.")
+            await update.message.reply_text("✅ Product added.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]]
+            ))
             return ConversationHandler.END
 
         if mode == "addcodes":
@@ -1422,7 +1538,10 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except sqlite3.IntegrityError:
                     skipped += 1
             con.commit()
-            await update.message.reply_text(f"✅ Added {added} codes to PID {pid}.\n♻️ Skipped duplicates: {skipped}")
+            await update.message.reply_text(
+                f"✅ Added {added} codes to PID {pid}.\n♻️ Skipped duplicates: {skipped}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]])
+            )
             return ConversationHandler.END
 
         if mode == "setprice":
@@ -1433,7 +1552,9 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             pid, price = int(m.group(1)), float(m.group(2))
             cur.execute("UPDATE products SET price=? WHERE pid=?", (price, pid))
             con.commit()
-            await update.message.reply_text("✅ Price updated.")
+            await update.message.reply_text("✅ Price updated.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]]
+            ))
             return ConversationHandler.END
 
         if mode == "toggle":
@@ -1447,7 +1568,9 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             newv = 0 if active else 1
             cur.execute("UPDATE products SET active=? WHERE pid=?", (newv, pid))
             con.commit()
-            await update.message.reply_text(f"✅ Product {'enabled' if newv else 'disabled'}.")
+            await update.message.reply_text(f"✅ Product {'enabled' if newv else 'disabled'}.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]]
+            ))
             return ConversationHandler.END
 
         if mode == "cancelorder":
@@ -1467,7 +1590,9 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             add_balance(user_id, total)
             cur.execute("UPDATE orders SET status='CANCELLED' WHERE id=?", (oid,))
             con.commit()
-            await update.message.reply_text(f"✅ Order #{oid} cancelled + refunded.")
+            await update.message.reply_text(f"✅ Order #{oid} cancelled + refunded.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]]
+            ))
             await context.bot.send_message(user_id, f"❌ Order #{oid} cancelled.\nRefunded: +{money(total)}")
             return ConversationHandler.END
 
@@ -1488,7 +1613,9 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cur.execute("UPDATE deposits SET status='APPROVED' WHERE id=?", (dep_id,))
             con.commit()
             add_balance(user_id, float(amount))
-            await update.message.reply_text(f"✅ Deposit #{dep_id} approved. +{money(float(amount))}")
+            await update.message.reply_text(f"✅ Deposit #{dep_id} approved. +{money(float(amount))}", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]]
+            ))
             await context.bot.send_message(user_id, f"✅ Top up approved: +{money(float(amount))}")
             return ConversationHandler.END
 
@@ -1505,7 +1632,9 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return ConversationHandler.END
             cur.execute("UPDATE deposits SET status='REJECTED' WHERE id=?", (dep_id,))
             con.commit()
-            await update.message.reply_text(f"✅ Deposit #{dep_id} rejected.")
+            await update.message.reply_text(f"✅ Deposit #{dep_id} rejected.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]]
+            ))
             await context.bot.send_message(user_id, f"❌ Top up #{dep_id} rejected. Contact support.")
             return ConversationHandler.END
 
@@ -1516,7 +1645,9 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return ConversationHandler.END
             user_id, amount = int(m.group(1)), float(m.group(2))
             add_balance(user_id, amount)
-            await update.message.reply_text(f"✅ Added +{money(amount)} to {user_id}")
+            await update.message.reply_text(f"✅ Added +{money(amount)} to {user_id}", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]]
+            ))
             await context.bot.send_message(user_id, f"✅ Admin added balance: +{money(amount)}")
             return ConversationHandler.END
 
@@ -1531,7 +1662,9 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text(f"❌ User has insufficient balance. User balance: {bal:.3f} {CURRENCY}")
                 return ConversationHandler.END
             add_balance(ADMIN_ID, amount)
-            await update.message.reply_text(f"✅ Took {money(amount)} from {user_id} → added to Admin.")
+            await update.message.reply_text(f"✅ Took {money(amount)} from {user_id} → added to Admin.", reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("⬅️ Admin Home", callback_data="ap:home")]]
+            ))
             await context.bot.send_message(user_id, f"➖ Admin deducted: -{money(amount)}")
             return ConversationHandler.END
 
@@ -1573,13 +1706,6 @@ async def rejectdep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =========================
-# Global error handler (optional but helpful)
-# =========================
-async def on_error(update: object, context: ContextTypes.DEFAULT_TYPE):
-    logger.exception("Unhandled error: %s", context.error)
-
-
-# =========================
 # Main
 # =========================
 def build_app():
@@ -1599,19 +1725,18 @@ def build_app():
         allow_reentry=True,
     )
 
-    # ✅ IMPORTANT ORDER
+    # Commands first
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("approvedep", approvedep_cmd))
     app.add_handler(CommandHandler("rejectdep", rejectdep_cmd))
 
-    # ✅ Conversation MUST be before menu router
+    # Conversation next
     app.add_handler(conv)
 
-    # ✅ Menu last
+    # Menu last
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, menu_router))
 
-    app.add_error_handler(on_error)
     return app
 
 
