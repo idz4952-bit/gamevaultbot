@@ -63,6 +63,55 @@ HIDDEN_CATEGORIES = {
     "🟦 STEAM (USA)",
 }
 
+# =========================
+# Product Guides (official website + description before buy)
+# =========================
+PRODUCT_GUIDES = {
+    "🪂 PUBG MOBILE UC VOUCHERS": {
+        "redeem_url": "https://www.midasbuy.com/",
+        "validity": "يمكن استخدام الأكواد لمدة لا تقل عن عام واحد بعد الشراء.\nبعد الشراء يتم الحصول عليها مباشرة من واجهة برمجة التطبيقات دون موردين خارجيين.",
+        "region": "عالمي",
+        "redeem_steps": [
+            "قم بزيارة MidasBuy",
+            "أدخل معرف PUBG الخاص بك",
+            "الصق الكود وقم باسترداده",
+        ],
+    },
+    "💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)": {
+        "redeem_url": "https://shop2game.com/",
+        "validity": "يمكن استخدام الأكواد لمدة لا تقل عن 3 أعوام بعد الشراء.\nبعد الشراء يتم الحصول عليها مباشرة من واجهة برمجة التطبيقات دون أي موردين خارجيين.",
+        "region": "عالمي",
+        "redeem_steps": [
+            "قم بزيارة shop2game.com",
+            "سجّل الدخول باستخدام بيانات Free Fire الخاصة بك",
+            "الصق الكود وقم باسترداده",
+        ],
+    },
+    "🍎 ITUNES GIFTCARD (USA)": {
+        "redeem_url": "https://redeem.apple.com/",
+        "validity": "يمكن استرداد الكود عبر Apple مباشرة.\nصلاحية طويلة حسب سياسة Apple.",
+        "region": "USA",
+        "redeem_steps": [
+            "افتح redeem.apple.com",
+            "سجّل دخول Apple ID",
+            "أدخل/الصق كود البطاقة ثم Redeem",
+        ],
+    },
+    "🎮 PLAYSTATION USA GIFTCARDS": {
+        "redeem_url": "https://www.playstation.com/support/store/redeem-ps-store-voucher-code/",
+        "validity": "يمكن استرداد الكود عبر PlayStation مباشرة.\nصلاحية طويلة حسب سياسة PlayStation.",
+        "region": "USA",
+        "redeem_steps": [
+            "افتح صفحة استرداد PlayStation",
+            "اتبع خطوات الاسترداد (Console/App/Web)",
+            "أدخل/الصق الكود ثم Redeem",
+        ],
+    },
+}
+
+FF_CODE_DIGITS_LEN = 16
+PUBG_CODE_ALNUM_LEN = 18
+
 if not TOKEN:
     raise RuntimeError("TOKEN env var is missing")
 if ADMIN_ID == 0:
@@ -220,6 +269,23 @@ def ensure_schema():
         pass
     try:
         cur.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_client_ref_unique ON orders(client_ref)")
+        con.commit()
+    except Exception:
+        pass
+
+    # ✅ Account suspension columns
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0")
+        con.commit()
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN suspended_reason TEXT")
+        con.commit()
+    except Exception:
+        pass
+    try:
+        cur.execute("ALTER TABLE users ADD COLUMN suspended_at TEXT")
         con.commit()
     except Exception:
         pass
@@ -438,6 +504,86 @@ def charge_balance(uid: int, amount: float) -> bool:
 
 
 # =========================
+# Suspension helpers
+# =========================
+def is_suspended(uid: int) -> bool:
+    ensure_user_exists(uid)
+    try:
+        cur.execute("SELECT suspended FROM users WHERE user_id=?", (uid,))
+        r = cur.fetchone()
+        return bool(r and int(r[0]) == 1)
+    except Exception:
+        return False
+
+
+def get_suspend_info(uid: int):
+    ensure_user_exists(uid)
+    try:
+        cur.execute(
+            "SELECT suspended, COALESCE(suspended_reason,''), COALESCE(suspended_at,'') FROM users WHERE user_id=?",
+            (uid,),
+        )
+        r = cur.fetchone() or (0, "", "")
+        return (int(r[0]) == 1, r[1] or "", r[2] or "")
+    except Exception:
+        return (False, "", "")
+
+
+# =========================
+# Product helpers (guide + validation)
+# =========================
+def get_category_title_by_cid(cid: int) -> str:
+    cur.execute("SELECT title FROM categories WHERE cid=?", (cid,))
+    row = cur.fetchone()
+    return (row[0] or "") if row else ""
+
+
+def get_product_category_title(pid: int) -> str:
+    cur.execute(
+        """
+        SELECT c.title
+        FROM products p JOIN categories c ON c.cid=p.cid
+        WHERE p.pid=?
+        """,
+        (pid,),
+    )
+    row = cur.fetchone()
+    return (row[0] or "") if row else ""
+
+
+def get_product_guide_by_cid(cid: int) -> dict:
+    title = get_category_title_by_cid(cid)
+    return PRODUCT_GUIDES.get(title, {})
+
+
+def validate_code_for_pid(pid: int, code_text: str):
+    """
+    Returns: (ok: bool, err: str)
+    Rules:
+    - Free Fire category: exactly 16 digits, numbers only
+    - PUBG category: exactly 18 alphanumeric (A-Z a-z 0-9)
+    """
+    code = (code_text or "").strip()
+    cat_title = get_product_category_title(pid)
+
+    if cat_title == "💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)":
+        if not code.isdigit():
+            return False, "❌ كود Free Fire لازم يكون أرقام فقط."
+        if len(code) != FF_CODE_DIGITS_LEN:
+            return False, "❌ كود Free Fire فيه رقم ناقص أو زائد (لازم 16 رقم)."
+        return True, ""
+
+    if cat_title == "🪂 PUBG MOBILE UC VOUCHERS":
+        if len(code) != PUBG_CODE_ALNUM_LEN:
+            return False, "❌ كود PUBG فيه حرف/رقم ناقص أو زائد (لازم 18)."
+        if not re.match(r"^[A-Za-z0-9]+$", code):
+            return False, "❌ كود PUBG لازم يكون حروف إنجليزية + أرقام فقط."
+        return True, ""
+
+    return True, ""
+
+
+# =========================
 # Delivery
 # =========================
 MAX_CODES_IN_MESSAGE = 200
@@ -458,7 +604,11 @@ async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, 
         content = "\n".join(codes)
         bio = io.BytesIO(content.encode("utf-8"))
         bio.name = f"order_{order_id}_codes.txt"
-        await context.bot.send_message(chat_id=chat_id, text=header + "📎 *Your codes are attached in a file:*", parse_mode=ParseMode.MARKDOWN)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=header + "📎 *Your codes are attached in a file:*",
+            parse_mode=ParseMode.MARKDOWN,
+        )
         await context.bot.send_document(chat_id=chat_id, document=bio)
         return
 
@@ -471,12 +621,10 @@ async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, 
     # تقسيم
     await context.bot.send_message(chat_id=chat_id, text=header + "🎁 Codes (part 1):", parse_mode=ParseMode.MARKDOWN)
     chunk = ""
-    part = 1
     for c in codes:
         line = c + "\n"
         if len(chunk) + len(line) > TELEGRAM_TEXT_LIMIT:
             await context.bot.send_message(chat_id=chat_id, text=f"`{chunk.rstrip()}`", parse_mode=ParseMode.MARKDOWN)
-            part += 1
             chunk = line
         else:
             chunk += line
@@ -529,13 +677,14 @@ def kb_products(cid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def kb_product_view(pid: int, cid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("🛒 Buy Now", callback_data=f"buy:{pid}")],
-            [InlineKeyboardButton("⬅️ Back", callback_data=f"back:prods:{cid}")],
-        ]
-    )
+def kb_product_view(pid: int, cid: int, url: str = "") -> InlineKeyboardMarkup:
+    rows = [
+        [InlineKeyboardButton("🛒 Buy Now", callback_data=f"buy:{pid}")],
+    ]
+    if url:
+        rows.append([InlineKeyboardButton("🌐 Official Website", url=url)])
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"back:prods:{cid}")])
+    return InlineKeyboardMarkup(rows)
 
 
 def kb_balance_methods() -> InlineKeyboardMarkup:
@@ -653,24 +802,24 @@ def kb_admin_manual_view(mid: int, service: str, has_email: bool, has_pass: bool
     if copy_row:
         rows.append(copy_row)
 
-    # ✅ أزرار قبول/رفض مع رسائل جاهزة
     rows.append(
         [
-            InlineKeyboardButton("✅ Approve ✅", callback_data=f"admin:manual:approve:{mid}"),
-            InlineKeyboardButton("🚫 Reject 🚫", callback_data=f"admin:manual:rejectmenu:{mid}"),
+            InlineKeyboardButton("✅ Approve", callback_data=f"admin:manual:approve:{mid}"),
+            InlineKeyboardButton("🚫 Reject", callback_data=f"admin:manual:rejectmenu:{mid}"),
         ]
     )
 
+    # ✅ Emojis updated + better labels
     if service == "FREEFIRE_MENA":
         rows.append(
             [
-                InlineKeyboardButton("🟥 Wrong ID", callback_data=f"admin:manual:reject:{mid}:WRONG_ID"),
-                InlineKeyboardButton("🟦 Other Server", callback_data=f"admin:manual:reject:{mid}:OTHER_SERVER"),
+                InlineKeyboardButton("🆔 Wrong ID", callback_data=f"admin:manual:reject:{mid}:WRONG_ID"),
+                InlineKeyboardButton("🌍 Other Server", callback_data=f"admin:manual:reject:{mid}:OTHER_SERVER"),
             ]
         )
         rows.append(
             [
-                InlineKeyboardButton("🟨 Not Available", callback_data=f"admin:manual:reject:{mid}:NOT_AVAILABLE"),
+                InlineKeyboardButton("⏳ Not Available", callback_data=f"admin:manual:reject:{mid}:NOT_AVAILABLE"),
                 InlineKeyboardButton("✍️ Custom", callback_data=f"admin:manual:reject:{mid}:CUSTOM"),
             ]
         )
@@ -682,12 +831,13 @@ def kb_admin_manual_view(mid: int, service: str, has_email: bool, has_pass: bool
     return InlineKeyboardMarkup(rows)
 
 
-def kb_admin_users_page(page: int, total_pages: int, rows: List[Tuple[int, str, str, float, int, float, int, float, float]]) -> InlineKeyboardMarkup:
+def kb_admin_users_page(page: int, total_pages: int, rows: List[Tuple[int, str, str, float, int, float, int, float, float, int]]) -> InlineKeyboardMarkup:
     buttons = []
-    for uid, username, first_name, bal, oc, osp, mc, msp, dep in rows:
+    for uid, username, first_name, bal, oc, osp, mc, msp, dep, suspended in rows:
         uname = f"@{username}" if username else ""
         name = first_name or ""
-        label = f"👤 {uid} {uname} {name}".strip()
+        sus_badge = "⛔" if int(suspended or 0) == 1 else "✅"
+        label = f"{sus_badge} {uid} {uname} {name}".strip()
         sub = f" | 💰{bal:.3f}{CURRENCY} | 🧾{oc} | 🔥{osp:.3f}{CURRENCY}"
         text = (label + sub)[:58]
         buttons.append([InlineKeyboardButton(text, callback_data=f"admin:user:view:{uid}")])
@@ -705,19 +855,27 @@ def kb_admin_users_page(page: int, total_pages: int, rows: List[Tuple[int, str, 
 
 
 def kb_admin_user_view(uid: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
+    sus = is_suspended(uid)
+    can_suspend = (uid != ADMIN_ID)
+
+    rows = [
         [
-            [
-                InlineKeyboardButton("➕ Add Balance", callback_data=f"admin:user:addbal:{uid}"),
-                InlineKeyboardButton("➖ Take Balance", callback_data=f"admin:user:takebal:{uid}"),
-            ],
-            [
-                InlineKeyboardButton("📄 Export Report", callback_data=f"admin:user:export:{uid}"),
-                InlineKeyboardButton("⬅️ Back", callback_data="admin:users:0"),
-            ],
-            [InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")],
+            InlineKeyboardButton("➕ Add Balance", callback_data=f"admin:user:addbal:{uid}"),
+            InlineKeyboardButton("➖ Take Balance", callback_data=f"admin:user:takebal:{uid}"),
+        ],
+    ]
+
+    if can_suspend:
+        rows.append([InlineKeyboardButton("✅ Unsuspend" if sus else "⛔ Suspend", callback_data=f"admin:user:suspend:{uid}")])
+
+    rows.append(
+        [
+            InlineKeyboardButton("📄 Export Report", callback_data=f"admin:user:export:{uid}"),
+            InlineKeyboardButton("⬅️ Back", callback_data="admin:users:0"),
         ]
     )
+    rows.append([InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")])
+    return InlineKeyboardMarkup(rows)
 
 
 def kb_qty_cancel(cid: int) -> InlineKeyboardMarkup:
@@ -966,6 +1124,17 @@ def smart_reply(msg: str) -> Optional[str]:
 
 async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
+    uid = update.effective_user.id
+
+    # ✅ block suspended users (except admin)
+    if (not is_admin(uid)) and is_suspended(uid):
+        sus, reason, _at = get_suspend_info(uid)
+        msg = "⛔ تم تعليق حسابك.\nتواصل مع الدعم."
+        if reason:
+            msg += f"\n\nالسبب: {reason}"
+        await update.message.reply_text(msg, reply_markup=kb_support())
+        return
+
     t = (update.message.text or "").strip()
 
     if t == "🛒 Our Products":
@@ -1342,13 +1511,13 @@ def _users_page(page: int, page_size: int = 10) -> Tuple[List[Tuple], int]:
     off = page * page_size
 
     cur.execute(
-        "SELECT user_id, username, first_name, balance FROM users ORDER BY user_id LIMIT ? OFFSET ?",
+        "SELECT user_id, username, first_name, balance, COALESCE(suspended,0) FROM users ORDER BY user_id LIMIT ? OFFSET ?",
         (page_size, off),
     )
     base_rows = cur.fetchall()
 
     out = []
-    for uid, username, first_name, bal in base_rows:
+    for uid, username, first_name, bal, suspended in base_rows:
         uid = int(uid)
         cur.execute("SELECT COUNT(*), COALESCE(SUM(total),0) FROM orders WHERE user_id=? AND status='COMPLETED'", (uid,))
         oc, osp = cur.fetchone()
@@ -1356,15 +1525,29 @@ def _users_page(page: int, page_size: int = 10) -> Tuple[List[Tuple], int]:
         mc, msp = cur.fetchone()
         cur.execute("SELECT COALESCE(SUM(amount),0) FROM deposits WHERE user_id=? AND status='APPROVED'", (uid,))
         dep = cur.fetchone()[0] or 0.0
-        out.append((uid, username or "", first_name or "", float(bal or 0), int(oc or 0), float(osp or 0), int(mc or 0), float(msp or 0), float(dep or 0)))
+        out.append(
+            (
+                uid,
+                username or "",
+                first_name or "",
+                float(bal or 0),
+                int(oc or 0),
+                float(osp or 0),
+                int(mc or 0),
+                float(msp or 0),
+                float(dep or 0),
+                int(suspended or 0),
+            )
+        )
     return out, total_pages
 
 
 def _user_report_text(uid: int, limit_each: int = 10) -> str:
     ensure_user_exists(uid)
-    cur.execute("SELECT username, first_name, balance FROM users WHERE user_id=?", (uid,))
-    row = cur.fetchone() or ("", "", 0.0)
+    cur.execute("SELECT username, first_name, balance, COALESCE(suspended,0), COALESCE(suspended_reason,''), COALESCE(suspended_at,'') FROM users WHERE user_id=?", (uid,))
+    row = cur.fetchone() or ("", "", 0.0, 0, "", "")
     username, first_name, bal = row[0] or "", row[1] or "", float(row[2] or 0.0)
+    suspended, reason, sat = int(row[3] or 0), row[4] or "", row[5] or ""
 
     cur.execute("SELECT COUNT(*), COALESCE(SUM(total),0) FROM orders WHERE user_id=? AND status='COMPLETED'", (uid,))
     oc, osp = cur.fetchone()
@@ -1381,6 +1564,11 @@ def _user_report_text(uid: int, limit_each: int = 10) -> str:
     if first_name:
         lines.append(f"🧾 Name: {first_name}")
     lines.append(f"💰 Balance: {bal:.3f}{CURRENCY}")
+    lines.append(f"⛔ Suspended: {'YES' if suspended == 1 else 'NO'}")
+    if suspended == 1 and sat:
+        lines.append(f"🕒 Suspended At: {sat}")
+    if suspended == 1 and reason:
+        lines.append(f"📝 Reason: {reason}")
     lines.append("")
     lines.append(f"🧾 Orders Completed: {int(oc or 0)} | Spent: {float(osp or 0):.3f}{CURRENCY}")
     lines.append(f"⚡ Manual Completed: {int(mc or 0)} | Spent: {float(msp or 0):.3f}{CURRENCY}")
@@ -1415,7 +1603,6 @@ def _user_report_text(uid: int, limit_each: int = 10) -> str:
 
 
 def _dashboard_text() -> str:
-    # profits = completed orders + completed manual
     cur.execute("SELECT COUNT(*), COALESCE(SUM(total),0) FROM orders WHERE status='COMPLETED'")
     oc, osp = cur.fetchone()
     cur.execute("SELECT COUNT(*), COALESCE(SUM(price),0) FROM manual_orders WHERE status='COMPLETED'")
@@ -1423,11 +1610,9 @@ def _dashboard_text() -> str:
     cur.execute("SELECT COUNT(*), COALESCE(SUM(amount),0) FROM deposits WHERE status='APPROVED'")
     dc, dep_sum = cur.fetchone()
 
-    # stock overview
     cur.execute("SELECT COALESCE(SUM(CASE WHEN used=0 THEN 1 ELSE 0 END),0) FROM codes")
     stock_all = int(cur.fetchone()[0] or 0)
 
-    # top products (by revenue)
     cur.execute(
         """
         SELECT product_title, COALESCE(SUM(total),0) as rev
@@ -1467,6 +1652,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
     data = q.data or ""
+
+    # ✅ block suspended users (except admin)
+    uid_now = update.effective_user.id
+    if (not is_admin(uid_now)) and is_suspended(uid_now):
+        sus, reason, _at = get_suspend_info(uid_now)
+        msg = "⛔ حسابك موقوف.\nتواصل مع الدعم."
+        if reason:
+            msg += f"\n\nالسبب: {reason}"
+        return await q.edit_message_text(msg, reply_markup=kb_support())
 
     if data == "noop":
         return
@@ -1601,6 +1795,38 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = int(data.split(":")[3])
         rep = _user_report_text(uid, limit_each=7)[:3800]
         return await q.edit_message_text(rep, reply_markup=kb_admin_user_view(uid))
+
+    # ✅ Toggle suspend / unsuspend (admin only, cannot suspend ADMIN_ID)
+    if data.startswith("admin:user:suspend:"):
+        if not is_admin(update.effective_user.id):
+            return await q.edit_message_text("❌ Not allowed.")
+        target_uid = int(data.split(":")[3])
+
+        if target_uid == ADMIN_ID:
+            await q.answer("❌ Cannot suspend admin", show_alert=True)
+            rep = _user_report_text(target_uid, limit_each=7)[:3800]
+            return await q.edit_message_text(rep, reply_markup=kb_admin_user_view(target_uid))
+
+        if is_suspended(target_uid):
+            cur.execute("UPDATE users SET suspended=0, suspended_reason=NULL, suspended_at=NULL WHERE user_id=?", (target_uid,))
+            con.commit()
+            try:
+                await context.bot.send_message(chat_id=target_uid, text="✅ تم رفع تعليق حسابك. يمكنك استخدام البوت الآن.")
+            except Exception:
+                pass
+        else:
+            cur.execute(
+                "UPDATE users SET suspended=1, suspended_reason=?, suspended_at=datetime('now') WHERE user_id=?",
+                ("", target_uid),
+            )
+            con.commit()
+            try:
+                await context.bot.send_message(chat_id=target_uid, text="⛔ تم تعليق حسابك. تواصل مع الدعم.")
+            except Exception:
+                pass
+
+        rep = _user_report_text(target_uid, limit_each=7)[:3800]
+        return await q.edit_message_text(rep, reply_markup=kb_admin_user_view(target_uid))
 
     if data.startswith("admin:user:export:"):
         if not is_admin(update.effective_user.id):
@@ -1788,9 +2014,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Choose reject reason (or custom):",
             reply_markup=InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("🟥 Wrong ID", callback_data=f"admin:manual:reject:{mid}:WRONG_ID")],
-                    [InlineKeyboardButton("🟦 Other Server", callback_data=f"admin:manual:reject:{mid}:OTHER_SERVER")],
-                    [InlineKeyboardButton("🟨 Not Available", callback_data=f"admin:manual:reject:{mid}:NOT_AVAILABLE")],
+                    [InlineKeyboardButton("🆔 Wrong ID", callback_data=f"admin:manual:reject:{mid}:WRONG_ID")],
+                    [InlineKeyboardButton("🌍 Other Server", callback_data=f"admin:manual:reject:{mid}:OTHER_SERVER")],
+                    [InlineKeyboardButton("⏳ Not Available", callback_data=f"admin:manual:reject:{mid}:NOT_AVAILABLE")],
                     [InlineKeyboardButton("✍️ Custom", callback_data=f"admin:manual:reject:{mid}:CUSTOM")],
                     [InlineKeyboardButton("⬅️ Back", callback_data=f"admin:manual:view:{mid}")],
                 ]
@@ -1811,9 +2037,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ST_ADMIN_INPUT
 
         reason_map = {
-            "WRONG_ID": "❌ تم الرفض: 🟥 الايدي خطأ.",
-            "OTHER_SERVER": "❌ تم الرفض: 🟦 الايدي من سيرفر/منطقة أخرى.",
-            "NOT_AVAILABLE": "❌ تم الرفض: 🟨 الخدمة غير متاحة حالياً.",
+            "WRONG_ID": "❌ تم الرفض: 🆔 الايدي غير صحيح.",
+            "OTHER_SERVER": "❌ تم الرفض: 🌍 الايدي من سيرفر/منطقة أخرى.",
+            "NOT_AVAILABLE": "❌ تم الرفض: ⏳ الخدمة غير متاحة حالياً.",
         }
         reason_text = reason_map.get(reason, "❌ Rejected.")
 
@@ -1905,7 +2131,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cid = int(data.split(":", 2)[2])
         return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
 
-    # View
+    # View (with official url + instructions)
     if data.startswith("view:"):
         pid = int(data.split(":", 1)[1])
         cur.execute("SELECT title, price, cid FROM products WHERE pid=? AND active=1", (pid,))
@@ -1915,13 +2141,40 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title, price, cid = row
         stock = product_stock(pid)
 
+        guide = get_product_guide_by_cid(cid)
+        redeem_url = guide.get("redeem_url", "")
+        validity = guide.get("validity", "")
+        region = guide.get("region", "")
+        steps = guide.get("redeem_steps", [])
+
+        desc_lines = []
+        if validity:
+            desc_lines.append(f"📝 *الوصف:*\n{validity}")
+        if redeem_url:
+            desc_lines.append("\n🔗 *الموقع الرسمي:*")
+            desc_lines.append(redeem_url)
+        if steps:
+            desc_lines.append("\n*للاسترداد:*")
+            for s in steps:
+                desc_lines.append(f"• {s}")
+        if region:
+            desc_lines.append(f"\n🌍 *المنطقة:* {region}")
+
+        desc_block = "\n".join(desc_lines).strip()
+
         text = (
-            f"🎁 *{title}*\n\n"
+            f"🛒 *{title}*\n\n"
             f"🆔 ID: `{pid}`\n"
-            f"💵 Price: *{float(price):.3f}* {CURRENCY}\n"
-            f"📦 Stock: *{stock}*"
+            f"💵 السعر: *{float(price):.3f}* {CURRENCY}\n"
+            f"📦 المخزون: *{stock}*\n\n"
+            f"{desc_block}"
+        ).strip()
+
+        return await q.edit_message_text(
+            text[:3800],
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_product_view(pid, cid, redeem_url),
         )
-        return await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_product_view(pid, cid))
 
     # Buy -> qty
     if data.startswith("buy:"):
@@ -1958,7 +2211,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if qty <= 0 or pid <= 0 or not client_ref:
             return await q.edit_message_text("❌ Quantity expired. Buy again.")
 
-        # if already processed, show same order
         cur.execute("SELECT id, delivered_text, status FROM orders WHERE client_ref=?", (client_ref,))
         already = cur.fetchone()
         if already:
@@ -1986,7 +2238,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=kb_topup_now(),
             )
 
-        # transactional pick
         try:
             cur.execute("BEGIN IMMEDIATE")
             cur.execute("SELECT code_id, code_text FROM codes WHERE pid=? AND used=0 ORDER BY code_id ASC LIMIT ?", (pid, qty))
@@ -2035,7 +2286,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🚚 Delivering codes... 🎁",
             parse_mode=ParseMode.MARKDOWN,
         )
-        # ✅ Instant delivery
         await send_codes_delivery(chat_id=uid, context=context, order_id=oid, codes=codes_list)
 
         try:
@@ -2175,8 +2425,8 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(
                     chat_id=uid,
                     text=(
-                        f"❌ Your manual order #{mid} was rejected.\n"
-                        f"Reason: {reason_text}\n\n"
+                        f"❌ تم رفض طلبك اليدوي #{mid}.\n"
+                        f"السبب: {reason_text}\n\n"
                         f"Refunded: +{price:.3f} {CURRENCY}\n"
                         f"💳 Balance before: {bal_before:.3f} {CURRENCY}\n"
                         f"✅ Balance after: {bal_after:.3f} {CURRENCY}\n"
@@ -2299,30 +2549,47 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Product added.")
             return ConversationHandler.END
 
+        # ✅ Add codes (text) with FF/PUBG rules
         if mode == "addcodes":
             if "|" not in text:
                 await update.message.reply_text("❌ Missing '|'.\nExample:\n12 | CODE1\nCODE2")
                 return ST_ADMIN_INPUT
             pid_s, codes_blob = [x.strip() for x in text.split("|", 1)]
+            if not pid_s.isdigit():
+                await update.message.reply_text("❌ PID لازم يكون رقم.")
+                return ST_ADMIN_INPUT
             pid = int(pid_s)
+
             codes = [c.strip() for c in codes_blob.splitlines() if c.strip()]
             if not codes:
                 await update.message.reply_text("❌ No codes.")
                 return ConversationHandler.END
 
-            added = 0
-            skipped = 0
+            added, skipped, invalid = 0, 0, 0
+            invalid_samples = []
+
             for ctext in codes:
+                ok, err = validate_code_for_pid(pid, ctext)
+                if not ok:
+                    invalid += 1
+                    if len(invalid_samples) < 5:
+                        invalid_samples.append(err)
+                    continue
                 try:
                     cur.execute("INSERT INTO codes(pid,code_text,used) VALUES(?,?,0)", (pid, ctext))
                     added += 1
                 except sqlite3.IntegrityError:
                     skipped += 1
+
             con.commit()
-            await update.message.reply_text(f"✅ Added {added} codes to PID {pid}.\n♻️ Skipped duplicates: {skipped}")
+
+            msg = f"✅ Added {added} codes to PID {pid}.\n♻️ Skipped duplicates: {skipped}\n❌ Invalid: {invalid}"
+            if invalid_samples:
+                msg += "\n\n" + "\n".join(dict.fromkeys(invalid_samples))
+            await update.message.reply_text(msg[:3800])
             return ConversationHandler.END
 
-        # Add codes file
+        # ✅ Add codes file with FF/PUBG rules
         if mode == "addcodesfile":
             if update.message.text and not update.message.document:
                 pid_txt = update.message.text.strip()
@@ -2358,18 +2625,29 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await update.message.reply_text("❌ File has no codes.")
                 return ConversationHandler.END
 
-            added = 0
-            skipped = 0
+            added, skipped, invalid = 0, 0, 0
+            invalid_samples = []
+
             for ctext in codes:
+                ok, err = validate_code_for_pid(pid, ctext)
+                if not ok:
+                    invalid += 1
+                    if len(invalid_samples) < 5:
+                        invalid_samples.append(err)
+                    continue
                 try:
                     cur.execute("INSERT INTO codes(pid,code_text,used) VALUES(?,?,0)", (pid, ctext))
                     added += 1
                 except sqlite3.IntegrityError:
                     skipped += 1
-            con.commit()
 
+            con.commit()
             context.user_data.pop(UD_ADMIN_CODES_PID, None)
-            await update.message.reply_text(f"✅ Added {added} codes to PID {pid} from file.\n♻️ Skipped duplicates: {skipped}")
+
+            msg = f"✅ Added {added} codes to PID {pid} from file.\n♻️ Skipped duplicates: {skipped}\n❌ Invalid: {invalid}"
+            if invalid_samples:
+                msg += "\n\n" + "\n".join(dict.fromkeys(invalid_samples))
+            await update.message.reply_text(msg[:3800])
             return ConversationHandler.END
 
         if mode == "setprice":
