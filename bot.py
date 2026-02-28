@@ -2807,20 +2807,37 @@ async def rejectdep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_app():
     app = ApplicationBuilder().token(TOKEN).build()
 
+    CB_PATTERN = r"^(cat:|view:|buy:|confirm:|pay:|paid:|manual:|admin:|orders:|back:|goto:)"
+
     conv = ConversationHandler(
         entry_points=[
-            CallbackQueryHandler(
-                on_callback,
-                pattern=r"^(cat:|view:|buy:|confirm:|pay:|paid:|manual:|admin:|orders:|back:|goto:)"
-            )
+            CallbackQueryHandler(on_callback, pattern=CB_PATTERN)
         ],
         states={
-            ST_QTY: [MessageHandler(filters.TEXT, qty_input)],
-            ST_TOPUP_DETAILS: [MessageHandler(filters.TEXT, topup_details_input)],
-            ST_ADMIN_INPUT: [MessageHandler(filters.TEXT | filters.Document.ALL, admin_input)],
-            ST_MANUAL_EMAIL: [MessageHandler(filters.TEXT, manual_email_input)],
-            ST_MANUAL_PASS: [MessageHandler(filters.TEXT, manual_pass_input)],
-            ST_FF_PLAYERID: [MessageHandler(filters.TEXT, ff_playerid_input)],
+            ST_QTY: [
+                MessageHandler(filters.TEXT, qty_input),
+                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
+            ],
+            ST_TOPUP_DETAILS: [
+                MessageHandler(filters.TEXT, topup_details_input),
+                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
+            ],
+            ST_ADMIN_INPUT: [
+                MessageHandler(filters.TEXT | filters.Document.ALL, admin_input),
+                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
+            ],
+            ST_MANUAL_EMAIL: [
+                MessageHandler(filters.TEXT, manual_email_input),
+                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
+            ],
+            ST_MANUAL_PASS: [
+                MessageHandler(filters.TEXT, manual_pass_input),
+                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
+            ],
+            ST_FF_PLAYERID: [
+                MessageHandler(filters.TEXT, ff_playerid_input),
+                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
+            ],
         },
         fallbacks=[CommandHandler("start", start_cmd)],
         allow_reentry=True,
