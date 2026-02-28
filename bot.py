@@ -1774,7 +1774,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = ["🛠 *Manual Prices*\nSend: `key | price`\nExample: `FF_100 | 0.95`\n"]
         for k, p in rows:
             lines.append(f"• `{k}` = *{float(p):.3f}{CURRENCY}*")
-        lines.append("\nKeys: SHAHID_MENA_3M, SHAHID_MENA_12M, FF_100, FF_210, FF_530, FF_1080, FF_2200")
+        lines.append("\nKeys: `SHAHID_MENA_3M`, `SHAHID_MENA_12M`, `FF_100`, `FF_210`, `FF_530`, `FF_1080`, `FF_2200`")
 
         context.user_data[UD_ADMIN_MODE] = "setmanualprice"
         await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN)
