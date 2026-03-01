@@ -741,10 +741,22 @@ def kb_orders_filters(page: int, total_pages: int) -> InlineKeyboardMarkup:
 
 
 def kb_support() -> InlineKeyboardMarkup:
+    phone = SUPPORT_PHONE.replace("+", "").replace(" ", "")
+
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("✉️ Support Group", url=to_tme(SUPPORT_GROUP))],
-            [InlineKeyboardButton("📣 Support Channel", url=to_tme(SUPPORT_CHANNEL))],
+            [
+                InlineKeyboardButton(
+                    "📞 Contact Support",
+                    url=f"https://t.me/{phone}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "📣 Support Channel",
+                    url=to_tme(SUPPORT_CHANNEL)
+                )
+            ],
         ]
     )
 
