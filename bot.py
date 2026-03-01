@@ -39,7 +39,7 @@ logger = logging.getLogger("shopbot")
 # ENV
 # =========================
 TOKEN = os.getenv("TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))  # Owner / Main Admin
 DB_PATH = os.getenv("DB_PATH", "shop.db")
 
 _db_dir = os.path.dirname(DB_PATH) if DB_PATH else ""
@@ -54,7 +54,7 @@ USDT_TRC20 = os.getenv("USDT_TRC20", "YOUR_USDT_TRC20_ADDRESS")
 USDT_BEP20 = os.getenv("USDT_BEP20", "YOUR_USDT_BEP20_ADDRESS")
 
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+213xxxxxxxxx")
-SUPPORT_GROUP = os.getenv("SUPPORT_GROUP", "@yourgroup")
+SUPPORT_CHAT = os.getenv("SUPPORT_CHAT", "@your_support")  # ✅ direct chat (not group)
 SUPPORT_CHANNEL = os.getenv("SUPPORT_CHANNEL", "@yourchannel")
 
 HIDDEN_CATEGORIES = {
@@ -63,76 +63,67 @@ HIDDEN_CATEGORIES = {
     "🟦 STEAM (USA)",
 }
 
-# =========================
-# Product Guides (official website + description before buy)
-# =========================
-PRODUCT_GUIDES = {
-    "🪂 PUBG MOBILE UC VOUCHERS": {
-        "redeem_url": "https://www.midasbuy.com/",
-        "validity": "يمكن استخدام الأكواد لمدة لا تقل عن عام واحد بعد الشراء.\nبعد الشراء يتم الحصول عليها مباشرة من واجهة برمجة التطبيقات دون موردين خارجيين.",
-        "region": "عالمي",
-        "redeem_steps": [
-            "قم بزيارة MidasBuy",
-            "أدخل معرف PUBG الخاص بك",
-            "الصق الكود وقم باسترداده",
-        ],
-    },
-    "💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)": {
-        "redeem_url": "https://shop2game.com/",
-        "validity": "يمكن استخدام الأكواد لمدة لا تقل عن 3 أعوام بعد الشراء.\nبعد الشراء يتم الحصول عليها مباشرة من واجهة برمجة التطبيقات دون أي موردين خارجيين.",
-        "region": "عالمي",
-        "redeem_steps": [
-            "قم بزيارة shop2game.com",
-            "سجّل الدخول باستخدام بيانات Free Fire الخاصة بك",
-            "الصق الكود وقم باسترداده",
-        ],
-    },
-    "🍎 ITUNES GIFTCARD (USA)": {
-        "redeem_url": "https://redeem.apple.com/",
-        "validity": "يمكن استرداد الكود عبر Apple مباشرة.\nصلاحية طويلة حسب سياسة Apple.",
-        "region": "USA",
-        "redeem_steps": [
-            "افتح redeem.apple.com",
-            "سجّل دخول Apple ID",
-            "أدخل/الصق كود البطاقة ثم Redeem",
-        ],
-    },
-    "🎮 PLAYSTATION USA GIFTCARDS": {
-        "redeem_url": "https://www.playstation.com/support/store/redeem-ps-store-voucher-code/",
-        "validity": "يمكن استرداد الكود عبر PlayStation مباشرة.\nصلاحية طويلة حسب سياسة PlayStation.",
-        "region": "USA",
-        "redeem_steps": [
-            "افتح صفحة استرداد PlayStation",
-            "اتبع خطوات الاسترداد (Console/App/Web)",
-            "أدخل/الصق الكود ثم Redeem",
-        ],
-    },
-}
-
-FF_CODE_DIGITS_LEN = 16
-PUBG_CODE_ALNUM_LEN = 18
-
 if not TOKEN:
     raise RuntimeError("TOKEN env var is missing")
 if ADMIN_ID == 0:
     raise RuntimeError("ADMIN_ID env var is missing or 0")
 
 
-def is_admin(uid: int) -> bool:
+# =========================
+# Admin roles
+# =========================
+ROLE_OWNER = "OWNER"
+ROLE_HELPER = "HELPER"  # only manual orders
+
+
+def is_owner(uid: int) -> bool:
     return uid == ADMIN_ID
+
+
+def to_tme(x: str) -> str:
+    x = (x or "").strip()
+    if not x:
+        return "https://t.me/"
+    if x.startswith("http://") or x.startswith("https://"):
+        return x
+    if x.startswith("@"):
+        return f"https://t.me/{x[1:]}"
+    return f"https://t.me/{x}"
 
 
 def money(x: float) -> str:
     return f"{x:.3f} {CURRENCY}"
 
 
-def to_tme(x: str) -> str:
-    x = (x or "").strip()
-    if x.startswith("http://") or x.startswith("https://"):
-        return x
-    if x.startswith("@"):
-        return f"https://t.me/{x[1:]}"
-    return f"https://t.me/{x}"
+# =========================
+# Working hours (Manual Orders) KSA
+# 10:00 -> 24:00 (00:00)
+# KSA = UTC+3
+# =========================
+KSA_UTC_OFFSET_HOURS = 3
+MANUAL_START_HOUR_KSA = 10
+MANUAL_END_HOUR_KSA = 24  # 12 ليلًا
+
+
+def now_ksa():
+    return datetime.utcnow() + timedelta(hours=KSA_UTC_OFFSET_HOURS)
+
+
+def manual_open_now() -> bool:
+    t = now_ksa()
+    h = t.hour
+    return MANUAL_START_HOUR_KSA <= h < MANUAL_END_HOUR_KSA
+
+
+def manual_hours_text() -> str:
+    # KSA 10->24, GMT 7->21
+    gmt_start = (MANUAL_START_HOUR_KSA - KSA_UTC_OFFSET_HOURS) % 24
+    gmt_end = (MANUAL_END_HOUR_KSA - KSA_UTC_OFFSET_HOURS) % 24
+    return (
+        "🕘 *Manual Working Hours*\n"
+        f"🇸🇦 KSA: {MANUAL_START_HOUR_KSA:02d}:00 → 24:00\n"
+        f"🌍 GMT: {gmt_start:02d}:00 → {gmt_end:02d}:00"
+    )
 
 
 # =========================
@@ -273,25 +264,64 @@ def ensure_schema():
     except Exception:
         pass
 
-    # ✅ Account suspension columns
+    # ✅ User suspend
     try:
         cur.execute("ALTER TABLE users ADD COLUMN suspended INTEGER NOT NULL DEFAULT 0")
         con.commit()
     except Exception:
         pass
+
+    # ✅ Admins table (Owner + Helpers)
     try:
-        cur.execute("ALTER TABLE users ADD COLUMN suspended_reason TEXT")
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admins(
+              user_id INTEGER PRIMARY KEY,
+              role TEXT NOT NULL
+            )
+            """
+        )
         con.commit()
     except Exception:
         pass
+
+    # ✅ manual_orders approved_by (admin id)
     try:
-        cur.execute("ALTER TABLE users ADD COLUMN suspended_at TEXT")
+        cur.execute("ALTER TABLE manual_orders ADD COLUMN approved_by INTEGER")
         con.commit()
     except Exception:
         pass
 
 
 ensure_schema()
+
+
+def seed_owner_admin():
+    # Ensure owner exists as OWNER in admins table
+    try:
+        cur.execute("INSERT OR REPLACE INTO admins(user_id, role) VALUES(?,?)", (ADMIN_ID, ROLE_OWNER))
+        con.commit()
+    except Exception:
+        pass
+
+
+seed_owner_admin()
+
+
+def admin_role(uid: int) -> Optional[str]:
+    cur.execute("SELECT role FROM admins WHERE user_id=?", (uid,))
+    r = cur.fetchone()
+    return r[0] if r else None
+
+
+def is_admin_any(uid: int) -> bool:
+    return admin_role(uid) in (ROLE_OWNER, ROLE_HELPER)
+
+
+def is_manual_admin(uid: int) -> bool:
+    # helper can only manage manual orders; owner can do everything
+    return admin_role(uid) in (ROLE_OWNER, ROLE_HELPER)
+
 
 # =========================
 # Manual Prices (Defaults)
@@ -408,7 +438,6 @@ MENU_BUTTONS = {
     "☎️ Contact Support",
 }
 
-# أزرار نصية إضافية لتفادي التعليق داخل وضع الأدمن
 ADMIN_TEXT_EXIT = {
     "⬅️ رجوع",
     "⬅ رجوع",
@@ -449,7 +478,6 @@ UD_FF_TOTAL = "ff_total"
 UD_ADMIN_MANUAL_ID = "admin_manual_id"
 UD_ADMIN_CODES_PID = "admin_codes_pid"
 
-# ✅ Anti-double-confirm
 UD_ORDER_CLIENT_REF = "order_client_ref"
 UD_LAST_QTY = "last_qty"
 UD_LAST_PID = "last_pid"
@@ -460,8 +488,8 @@ UD_LAST_PID = "last_pid"
 def upsert_user(u):
     cur.execute(
         """
-        INSERT INTO users(user_id, username, first_name, balance)
-        VALUES(?,?,?,0)
+        INSERT INTO users(user_id, username, first_name, balance, suspended)
+        VALUES(?,?,?,0,0)
         ON CONFLICT(user_id) DO UPDATE SET username=excluded.username, first_name=excluded.first_name
         """,
         (u.id, u.username or "", u.first_name or ""),
@@ -472,12 +500,25 @@ def upsert_user(u):
 def ensure_user_exists(user_id: int, username: str = "", first_name: str = ""):
     cur.execute(
         """
-        INSERT INTO users(user_id, username, first_name, balance)
-        VALUES(?,?,?,0)
+        INSERT INTO users(user_id, username, first_name, balance, suspended)
+        VALUES(?,?,?,0,0)
         ON CONFLICT(user_id) DO NOTHING
         """,
         (user_id, username, first_name),
     )
+    con.commit()
+
+
+def is_suspended(uid: int) -> bool:
+    ensure_user_exists(uid)
+    cur.execute("SELECT suspended FROM users WHERE user_id=?", (uid,))
+    row = cur.fetchone()
+    return bool(int(row[0] or 0)) if row else False
+
+
+def set_suspended(uid: int, val: bool):
+    ensure_user_exists(uid)
+    cur.execute("UPDATE users SET suspended=? WHERE user_id=?", (1 if val else 0, uid))
     con.commit()
 
 
@@ -503,84 +544,11 @@ def charge_balance(uid: int, amount: float) -> bool:
     return True
 
 
-# =========================
-# Suspension helpers
-# =========================
-def is_suspended(uid: int) -> bool:
-    ensure_user_exists(uid)
-    try:
-        cur.execute("SELECT suspended FROM users WHERE user_id=?", (uid,))
-        r = cur.fetchone()
-        return bool(r and int(r[0]) == 1)
-    except Exception:
+def must_block_user(update: Update) -> bool:
+    uid = update.effective_user.id
+    if is_admin_any(uid):
         return False
-
-
-def get_suspend_info(uid: int):
-    ensure_user_exists(uid)
-    try:
-        cur.execute(
-            "SELECT suspended, COALESCE(suspended_reason,''), COALESCE(suspended_at,'') FROM users WHERE user_id=?",
-            (uid,),
-        )
-        r = cur.fetchone() or (0, "", "")
-        return (int(r[0]) == 1, r[1] or "", r[2] or "")
-    except Exception:
-        return (False, "", "")
-
-
-# =========================
-# Product helpers (guide + validation)
-# =========================
-def get_category_title_by_cid(cid: int) -> str:
-    cur.execute("SELECT title FROM categories WHERE cid=?", (cid,))
-    row = cur.fetchone()
-    return (row[0] or "") if row else ""
-
-
-def get_product_category_title(pid: int) -> str:
-    cur.execute(
-        """
-        SELECT c.title
-        FROM products p JOIN categories c ON c.cid=p.cid
-        WHERE p.pid=?
-        """,
-        (pid,),
-    )
-    row = cur.fetchone()
-    return (row[0] or "") if row else ""
-
-
-def get_product_guide_by_cid(cid: int) -> dict:
-    title = get_category_title_by_cid(cid)
-    return PRODUCT_GUIDES.get(title, {})
-
-
-def validate_code_for_pid(pid: int, code_text: str):
-    """
-    Returns: (ok: bool, err: str)
-    Rules:
-    - Free Fire category: exactly 16 digits, numbers only
-    - PUBG category: exactly 18 alphanumeric (A-Z a-z 0-9)
-    """
-    code = (code_text or "").strip()
-    cat_title = get_product_category_title(pid)
-
-    if cat_title == "💎 GARENA FREE FIRE VOUCHERS (OFFICIAL)":
-        if not code.isdigit():
-            return False, "❌ كود Free Fire لازم يكون أرقام فقط."
-        if len(code) != FF_CODE_DIGITS_LEN:
-            return False, "❌ كود Free Fire فيه رقم ناقص أو زائد (لازم 16 رقم)."
-        return True, ""
-
-    if cat_title == "🪂 PUBG MOBILE UC VOUCHERS":
-        if len(code) != PUBG_CODE_ALNUM_LEN:
-            return False, "❌ كود PUBG فيه حرف/رقم ناقص أو زائد (لازم 18)."
-        if not re.match(r"^[A-Za-z0-9]+$", code):
-            return False, "❌ كود PUBG لازم يكون حروف إنجليزية + أرقام فقط."
-        return True, ""
-
-    return True, ""
+    return is_suspended(uid)
 
 
 # =========================
@@ -599,16 +567,11 @@ async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, 
         await context.bot.send_message(chat_id=chat_id, text=f"✅ Order #{order_id} COMPLETED\n(No codes)")
         return
 
-    # إذا كثيرة جداً: ملف
     if count > MAX_CODES_IN_MESSAGE:
         content = "\n".join(codes)
         bio = io.BytesIO(content.encode("utf-8"))
         bio.name = f"order_{order_id}_codes.txt"
-        await context.bot.send_message(
-            chat_id=chat_id,
-            text=header + "📎 *Your codes are attached in a file:*",
-            parse_mode=ParseMode.MARKDOWN,
-        )
+        await context.bot.send_message(chat_id=chat_id, text=header + "📎 *Your codes are attached in a file:*", parse_mode=ParseMode.MARKDOWN)
         await context.bot.send_document(chat_id=chat_id, document=bio)
         return
 
@@ -618,7 +581,6 @@ async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, 
         await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
         return
 
-    # تقسيم
     await context.bot.send_message(chat_id=chat_id, text=header + "🎁 Codes (part 1):", parse_mode=ParseMode.MARKDOWN)
     chunk = ""
     for c in codes:
@@ -677,14 +639,14 @@ def kb_products(cid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(rows)
 
 
-def kb_product_view(pid: int, cid: int, url: str = "") -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton("🛒 Buy Now", callback_data=f"buy:{pid}")],
-    ]
-    if url:
-        rows.append([InlineKeyboardButton("🌐 Official Website", url=url)])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"back:prods:{cid}")])
-    return InlineKeyboardMarkup(rows)
+def kb_product_view(pid: int, cid: int) -> InlineKeyboardMarkup:
+    # ✅ Official Website removed
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🛒 Buy Now", callback_data=f"buy:{pid}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"back:prods:{cid}")],
+        ]
+    )
 
 
 def kb_balance_methods() -> InlineKeyboardMarkup:
@@ -741,28 +703,23 @@ def kb_orders_filters(page: int, total_pages: int) -> InlineKeyboardMarkup:
 
 
 def kb_support() -> InlineKeyboardMarkup:
-    phone = SUPPORT_PHONE.replace("+", "").replace(" ", "")
+    # ✅ Direct chat support (not group)
+    rows = [
+        [InlineKeyboardButton("💬 Support Chat", url=to_tme(SUPPORT_CHAT))],
+        [InlineKeyboardButton("📣 Support Channel", url=to_tme(SUPPORT_CHANNEL))],
+    ]
+    return InlineKeyboardMarkup(rows)
 
-    return InlineKeyboardMarkup(
-        [
+
+def kb_admin_panel(uid: int) -> InlineKeyboardMarkup:
+    # ✅ Owner sees full panel, helper sees only Manual Orders
+    if admin_role(uid) == ROLE_HELPER:
+        return InlineKeyboardMarkup(
             [
-                InlineKeyboardButton(
-                    "📞 Contact Support",
-                    url=f"https://t.me/{phone}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    "📣 Support Channel",
-                    url=to_tme(SUPPORT_CHANNEL)
-                )
-            ],
-        ]
-    )
+                [InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0")],
+            ]
+        )
 
-
-def kb_admin_panel() -> InlineKeyboardMarkup:
-    # ✅ بدون Vouchers (محذوف)
     return InlineKeyboardMarkup(
         [
             [
@@ -771,7 +728,7 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0"),
-                InlineKeyboardButton("💰 Deposits", callback_data="admin:deps:0"),
+                InlineKeyboardButton("💰 Deposits", callback_data="admin:deps:0"),  # kept placeholder
             ],
             [
                 InlineKeyboardButton("📋 Products (PID)", callback_data="admin:listprod"),
@@ -797,6 +754,9 @@ def kb_admin_panel() -> InlineKeyboardMarkup:
                 InlineKeyboardButton("➕ Add Balance", callback_data="admin:addbal"),
                 InlineKeyboardButton("➖ Take Balance", callback_data="admin:takebal"),
             ],
+            [
+                InlineKeyboardButton("👑 Admins", callback_data="admin:admins"),
+            ],
         ]
     )
 
@@ -816,22 +776,21 @@ def kb_admin_manual_view(mid: int, service: str, has_email: bool, has_pass: bool
 
     rows.append(
         [
-            InlineKeyboardButton("✅ Approve", callback_data=f"admin:manual:approve:{mid}"),
-            InlineKeyboardButton("🚫 Reject", callback_data=f"admin:manual:rejectmenu:{mid}"),
+            InlineKeyboardButton("✅ Approve ✅", callback_data=f"admin:manual:approve:{mid}"),
+            InlineKeyboardButton("🚫 Reject 🚫", callback_data=f"admin:manual:rejectmenu:{mid}"),
         ]
     )
 
-    # ✅ Emojis updated + better labels
     if service == "FREEFIRE_MENA":
         rows.append(
             [
-                InlineKeyboardButton("🆔 Wrong ID", callback_data=f"admin:manual:reject:{mid}:WRONG_ID"),
-                InlineKeyboardButton("🌍 Other Server", callback_data=f"admin:manual:reject:{mid}:OTHER_SERVER"),
+                InlineKeyboardButton("🟥 Wrong ID", callback_data=f"admin:manual:reject:{mid}:WRONG_ID"),
+                InlineKeyboardButton("🟦 Other Server", callback_data=f"admin:manual:reject:{mid}:OTHER_SERVER"),
             ]
         )
         rows.append(
             [
-                InlineKeyboardButton("⏳ Not Available", callback_data=f"admin:manual:reject:{mid}:NOT_AVAILABLE"),
+                InlineKeyboardButton("🟨 Not Available", callback_data=f"admin:manual:reject:{mid}:NOT_AVAILABLE"),
                 InlineKeyboardButton("✍️ Custom", callback_data=f"admin:manual:reject:{mid}:CUSTOM"),
             ]
         )
@@ -848,8 +807,8 @@ def kb_admin_users_page(page: int, total_pages: int, rows: List[Tuple[int, str, 
     for uid, username, first_name, bal, oc, osp, mc, msp, dep, suspended in rows:
         uname = f"@{username}" if username else ""
         name = first_name or ""
-        sus_badge = "⛔" if int(suspended or 0) == 1 else "✅"
-        label = f"{sus_badge} {uid} {uname} {name}".strip()
+        sflag = " ⛔" if int(suspended) == 1 else ""
+        label = f"👤 {uid}{sflag} {uname} {name}".strip()
         sub = f" | 💰{bal:.3f}{CURRENCY} | 🧾{oc} | 🔥{osp:.3f}{CURRENCY}"
         text = (label + sub)[:58]
         buttons.append([InlineKeyboardButton(text, callback_data=f"admin:user:view:{uid}")])
@@ -866,26 +825,27 @@ def kb_admin_users_page(page: int, total_pages: int, rows: List[Tuple[int, str, 
     return InlineKeyboardMarkup(buttons)
 
 
-def kb_admin_user_view(uid: int) -> InlineKeyboardMarkup:
-    sus = is_suspended(uid)
-    can_suspend = (uid != ADMIN_ID)
+def kb_admin_user_view(uid: int, suspended: int) -> InlineKeyboardMarkup:
+    # ✅ Suspend/Unsuspend (cannot for admins)
+    can_suspend = (not is_admin_any(uid)) and (uid != ADMIN_ID)
 
     rows = [
         [
             InlineKeyboardButton("➕ Add Balance", callback_data=f"admin:user:addbal:{uid}"),
             InlineKeyboardButton("➖ Take Balance", callback_data=f"admin:user:takebal:{uid}"),
         ],
-    ]
-
-    if can_suspend:
-        rows.append([InlineKeyboardButton("✅ Unsuspend" if sus else "⛔ Suspend", callback_data=f"admin:user:suspend:{uid}")])
-
-    rows.append(
         [
             InlineKeyboardButton("📄 Export Report", callback_data=f"admin:user:export:{uid}"),
             InlineKeyboardButton("⬅️ Back", callback_data="admin:users:0"),
-        ]
-    )
+        ],
+    ]
+
+    if can_suspend:
+        if int(suspended) == 1:
+            rows.insert(1, [InlineKeyboardButton("✅ Unsuspend User", callback_data=f"admin:user:unsuspend:{uid}")])
+        else:
+            rows.insert(1, [InlineKeyboardButton("⛔ Suspend User", callback_data=f"admin:user:suspend:{uid}")])
+
     rows.append([InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")])
     return InlineKeyboardMarkup(rows)
 
@@ -975,7 +935,8 @@ def ff_menu_text() -> str:
         "💎 *Free Fire (MENA)*\n\n"
         "🛒 Add packs to cart ثم Checkout.\n"
         "⏱ Delivery: *1-5 minutes*\n\n"
-        "💡 تقدر تمسح السلة أو تكمل الدفع ✅"
+        "✅ تقدر تمسح السلة أو تكمل الدفع\n\n"
+        + manual_hours_text()
     )
 
 
@@ -986,9 +947,7 @@ def kb_ff_menu(context) -> InlineKeyboardMarkup:
         qty = int(cart.get(sku, 0))
         suffix = f"  🧺[{qty}]" if qty > 0 else ""
         price = get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0))
-        rows.append(
-            [InlineKeyboardButton(f"{title} 💎 | {float(price):.3f}{CURRENCY}{suffix}", callback_data=f"manual:ff:add:{sku}")]
-        )
+        rows.append([InlineKeyboardButton(f"{title} 💎 | {float(price):.3f}{CURRENCY}{suffix}", callback_data=f"manual:ff:add:{sku}")])
 
     rows.append([InlineKeyboardButton("🗑 Clear Cart", callback_data="manual:ff:clear")])
     rows.append([InlineKeyboardButton("✅ Proceed to Checkout", callback_data="manual:ff:checkout")])
@@ -1025,8 +984,11 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user and must_block_user(update):
+        return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
+
     text = "🛒 *Our Categories*\nاختر قسم 👇"
-    kb = kb_categories(is_admin(update.effective_user.id))
+    kb = kb_categories(is_admin_any(update.effective_user.id))
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
     else:
@@ -1034,6 +996,11 @@ async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user and must_block_user(update):
+        if update.message:
+            return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
+        return await update.callback_query.edit_message_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
+
     u = update.effective_user
     uid = u.id
     bal = get_balance(uid)
@@ -1096,6 +1063,11 @@ def _format_orders_page(rows: List[Tuple], page: int, page_size: int = 4) -> Tup
 
 
 async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, rng: str = "all", page: int = 0):
+    if update.effective_user and must_block_user(update):
+        if update.message:
+            return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
+        return await update.callback_query.edit_message_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
+
     uid = update.effective_user.id
     context.user_data[UD_ORD_RNG] = rng
 
@@ -1112,7 +1084,7 @@ async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "☎️ *Support*\n\n"
         f"📞 Phone: `{SUPPORT_PHONE}`\n"
-        f"👥 Group: {SUPPORT_GROUP}\n\n"
+        f"💬 Chat: {SUPPORT_CHAT}\n\n"
         "اختر 👇"
     )
     if update.message:
@@ -1136,16 +1108,13 @@ def smart_reply(msg: str) -> Optional[str]:
 
 async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
-    uid = update.effective_user.id
 
-    # ✅ block suspended users (except admin)
-    if (not is_admin(uid)) and is_suspended(uid):
-        sus, reason, _at = get_suspend_info(uid)
-        msg = "⛔ تم تعليق حسابك.\nتواصل مع الدعم."
-        if reason:
-            msg += f"\n\nالسبب: {reason}"
-        await update.message.reply_text(msg, reply_markup=kb_support())
-        return
+    # block suspended users (except admins)
+    if must_block_user(update):
+        t = (update.message.text or "").strip()
+        if t in ("☎️ Contact Support",):
+            return await show_support(update, context)
+        return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
 
     t = (update.message.text or "").strip()
 
@@ -1158,6 +1127,13 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if t == "☎️ Contact Support":
         return await show_support(update, context)
     if t == "⚡ Manual Order":
+        # ✅ enforce hours
+        if not manual_open_now() and not is_admin_any(update.effective_user.id):
+            return await update.message.reply_text(
+                "⛔ الشحن اليدوي مغلق الآن.\n\n" + manual_hours_text(),
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=REPLY_MENU,
+            )
         return await update.message.reply_text("⚡ *MANUAL ORDER*\nSelect a service:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_manual_services())
 
     hint = smart_reply(t)
@@ -1173,7 +1149,9 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
 
-    # allow menu buttons anytime
+    if must_block_user(update):
+        return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
+
     if txt in MENU_BUTTONS:
         context.user_data.pop(UD_PID, None)
         context.user_data.pop(UD_CID, None)
@@ -1214,7 +1192,6 @@ async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     title, price = row
     total = float(price) * qty
 
-    # ✅ create unique client_ref to prevent double confirm
     client_ref = secrets.token_hex(10)
     context.user_data[UD_ORDER_CLIENT_REF] = client_ref
     context.user_data[UD_LAST_QTY] = qty
@@ -1232,7 +1209,7 @@ async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"🎮 Product: *{title}*\n"
         f"🔢 Qty: *{qty}*\n"
         f"💵 Total: *{money(total)}*\n\n"
-        f"اضغط ✅ Confirm لإتمام العملية",
+        "اضغط ✅ Confirm لإتمام العملية",
         parse_mode=ParseMode.MARKDOWN,
         reply_markup=kb,
     )
@@ -1244,6 +1221,9 @@ async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
+
+    if must_block_user(update):
+        return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
 
     if txt in MENU_BUTTONS:
         context.user_data.pop(UD_DEP_ID, None)
@@ -1316,6 +1296,9 @@ async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE
 async def manual_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
 
+    if must_block_user(update):
+        return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
+
     if txt in MENU_BUTTONS:
         for k in [UD_MANUAL_SERVICE, UD_MANUAL_PLAN, UD_MANUAL_PRICE, UD_MANUAL_PLAN_TITLE, UD_MANUAL_EMAIL]:
             context.user_data.pop(k, None)
@@ -1337,6 +1320,9 @@ async def manual_email_input(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     pwd = (update.message.text or "").strip()
+
+    if must_block_user(update):
+        return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
 
     if pwd in MENU_BUTTONS:
         for k in [UD_MANUAL_SERVICE, UD_MANUAL_PLAN, UD_MANUAL_PRICE, UD_MANUAL_PLAN_TITLE, UD_MANUAL_EMAIL]:
@@ -1420,6 +1406,9 @@ async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     txt = (update.message.text or "").strip()
+
+    if must_block_user(update):
+        return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
 
     if txt in MENU_BUTTONS:
         context.user_data.pop(UD_FF_CART, None)
@@ -1523,7 +1512,7 @@ def _users_page(page: int, page_size: int = 10) -> Tuple[List[Tuple], int]:
     off = page * page_size
 
     cur.execute(
-        "SELECT user_id, username, first_name, balance, COALESCE(suspended,0) FROM users ORDER BY user_id LIMIT ? OFFSET ?",
+        "SELECT user_id, username, first_name, balance, suspended FROM users ORDER BY user_id LIMIT ? OFFSET ?",
         (page_size, off),
     )
     base_rows = cur.fetchall()
@@ -1537,29 +1526,15 @@ def _users_page(page: int, page_size: int = 10) -> Tuple[List[Tuple], int]:
         mc, msp = cur.fetchone()
         cur.execute("SELECT COALESCE(SUM(amount),0) FROM deposits WHERE user_id=? AND status='APPROVED'", (uid,))
         dep = cur.fetchone()[0] or 0.0
-        out.append(
-            (
-                uid,
-                username or "",
-                first_name or "",
-                float(bal or 0),
-                int(oc or 0),
-                float(osp or 0),
-                int(mc or 0),
-                float(msp or 0),
-                float(dep or 0),
-                int(suspended or 0),
-            )
-        )
+        out.append((uid, username or "", first_name or "", float(bal or 0), int(oc or 0), float(osp or 0), int(mc or 0), float(msp or 0), float(dep or 0), int(suspended or 0)))
     return out, total_pages
 
 
 def _user_report_text(uid: int, limit_each: int = 10) -> str:
     ensure_user_exists(uid)
-    cur.execute("SELECT username, first_name, balance, COALESCE(suspended,0), COALESCE(suspended_reason,''), COALESCE(suspended_at,'') FROM users WHERE user_id=?", (uid,))
-    row = cur.fetchone() or ("", "", 0.0, 0, "", "")
-    username, first_name, bal = row[0] or "", row[1] or "", float(row[2] or 0.0)
-    suspended, reason, sat = int(row[3] or 0), row[4] or "", row[5] or ""
+    cur.execute("SELECT username, first_name, balance, suspended FROM users WHERE user_id=?", (uid,))
+    row = cur.fetchone() or ("", "", 0.0, 0)
+    username, first_name, bal, suspended = row[0] or "", row[1] or "", float(row[2] or 0.0), int(row[3] or 0)
 
     cur.execute("SELECT COUNT(*), COALESCE(SUM(total),0) FROM orders WHERE user_id=? AND status='COMPLETED'", (uid,))
     oc, osp = cur.fetchone()
@@ -1571,16 +1546,12 @@ def _user_report_text(uid: int, limit_each: int = 10) -> str:
     lines = []
     lines.append("👥 CUSTOMER REPORT")
     lines.append(f"🆔 User ID: {uid}")
+    lines.append(f"⛔ Suspended: {'YES' if suspended else 'NO'}")
     if username:
         lines.append(f"👤 Username: @{username}")
     if first_name:
         lines.append(f"🧾 Name: {first_name}")
     lines.append(f"💰 Balance: {bal:.3f}{CURRENCY}")
-    lines.append(f"⛔ Suspended: {'YES' if suspended == 1 else 'NO'}")
-    if suspended == 1 and sat:
-        lines.append(f"🕒 Suspended At: {sat}")
-    if suspended == 1 and reason:
-        lines.append(f"📝 Reason: {reason}")
     lines.append("")
     lines.append(f"🧾 Orders Completed: {int(oc or 0)} | Spent: {float(osp or 0):.3f}{CURRENCY}")
     lines.append(f"⚡ Manual Completed: {int(mc or 0)} | Spent: {float(msp or 0):.3f}{CURRENCY}")
@@ -1595,11 +1566,12 @@ def _user_report_text(uid: int, limit_each: int = 10) -> str:
 
     lines.append("\n--- LAST MANUAL ---")
     cur.execute(
-        "SELECT id, service, plan_title, price, status, created_at FROM manual_orders WHERE user_id=? ORDER BY id DESC LIMIT ?",
+        "SELECT id, service, plan_title, price, status, created_at, COALESCE(approved_by,'') FROM manual_orders WHERE user_id=? ORDER BY id DESC LIMIT ?",
         (uid, limit_each),
     )
-    for mid, service, plan_title, price, status, created_at in cur.fetchall():
-        lines.append(f"M#{mid} | {status} | {float(price):.3f}{CURRENCY} | {created_at} | {service} | {plan_title}")
+    for mid, service, plan_title, price, status, created_at, approved_by in cur.fetchall():
+        ab = f" | approved_by={approved_by}" if approved_by else ""
+        lines.append(f"M#{mid} | {status} | {float(price):.3f}{CURRENCY} | {created_at} | {service} | {plan_title}{ab}")
 
     lines.append("\n--- LAST DEPOSITS ---")
     cur.execute(
@@ -1658,6 +1630,67 @@ def _dashboard_text() -> str:
 
 
 # =========================
+# Code validation rules for Admin adding codes
+# =========================
+FF_CODE_RE = re.compile(r"^\d{16}$")
+PUBG_CODE_RE = re.compile(r"^[A-Za-z0-9]{18}$")
+
+
+def _pid_code_rule(pid: int) -> Optional[str]:
+    """
+    Return 'FF16' or 'PUBG18' or None based on category/product title.
+    """
+    cur.execute(
+        """
+        SELECT p.title, c.title
+        FROM products p
+        JOIN categories c ON c.cid=p.cid
+        WHERE p.pid=?
+        """,
+        (pid,),
+    )
+    row = cur.fetchone()
+    if not row:
+        return None
+    ptitle = (row[0] or "").upper()
+    ctitle = (row[1] or "").upper()
+
+    blob = f"{ptitle} {ctitle}"
+    if "FREE FIRE" in blob or "GARENA" in blob:
+        return "FF16"
+    if "PUBG" in blob:
+        return "PUBG18"
+    return None
+
+
+def validate_codes_for_pid(pid: int, codes: List[str]) -> Tuple[bool, str]:
+    rule = _pid_code_rule(pid)
+    if not rule:
+        return True, ""
+
+    bad = []
+    for c in codes:
+        cc = (c or "").strip().replace(" ", "")
+        if rule == "FF16":
+            if not FF_CODE_RE.match(cc):
+                bad.append(cc)
+        elif rule == "PUBG18":
+            if not PUBG_CODE_RE.match(cc):
+                bad.append(cc)
+
+    if not bad:
+        return True, ""
+
+    # determine if too short/long for first bad
+    sample = bad[0]
+    if rule == "FF16":
+        msg = f"❌ Free Fire code must be 16 digits فقط.\nمثال: 1234567890123456\nBad sample: {sample}"
+    else:
+        msg = f"❌ PUBG code must be 18 characters (A-Z a-z 0-9).\nBad sample: {sample}"
+    return False, msg
+
+
+# =========================
 # Callback handler
 # =========================
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1665,19 +1698,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     data = q.data or ""
 
-    # ✅ block suspended users (except admin)
-    uid_now = update.effective_user.id
-    if (not is_admin(uid_now)) and is_suspended(uid_now):
-        sus, reason, _at = get_suspend_info(uid_now)
-        msg = "⛔ حسابك موقوف.\nتواصل مع الدعم."
-        if reason:
-            msg += f"\n\nالسبب: {reason}"
-        return await q.edit_message_text(msg, reply_markup=kb_support())
+    # block suspended users (except admins)
+    if update.effective_user and must_block_user(update):
+        if data in ("goto:cats", "goto:balance", "goto:topup", "back:cats"):
+            return await q.edit_message_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
+        return await q.answer("Account suspended", show_alert=True)
 
     if data == "noop":
         return
 
-    # quick nav
     if data == "goto:cats":
         return await show_categories(update, context)
     if data == "goto:balance" or data == "goto:topup":
@@ -1688,15 +1717,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await q.edit_message_text("⚡ *MANUAL ORDER*\nSelect a service:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_manual_services())
 
     if data == "manual:shahid":
+        if not manual_open_now() and not is_admin_any(update.effective_user.id):
+            return await q.edit_message_text("⛔ الشحن اليدوي مغلق الآن.\n\n" + manual_hours_text(), parse_mode=ParseMode.MARKDOWN)
         text = (
             "📺 *Shahid*\n\n"
             "📩 المطلوب منك:\n"
             "➡️ Gmail جديد\n"
-            "➡️ Password مؤقت\n"
+            "➡️ Password مؤقت\n\n"
+            + manual_hours_text()
         )
         return await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_shahid_plans())
 
     if data.startswith("manual:shahid:"):
+        if not manual_open_now() and not is_admin_any(update.effective_user.id):
+            return await q.edit_message_text("⛔ الشحن اليدوي مغلق الآن.\n\n" + manual_hours_text(), parse_mode=ParseMode.MARKDOWN)
+
         plan = data.split(":")[2]
         if plan == "MENA_3M":
             plan_title = "Shahid [MENA] | 3 Month"
@@ -1728,6 +1763,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ST_MANUAL_EMAIL
 
     if data == "manual:ff":
+        if not manual_open_now() and not is_admin_any(update.effective_user.id):
+            return await q.edit_message_text("⛔ الشحن اليدوي مغلق الآن.\n\n" + manual_hours_text(), parse_mode=ParseMode.MARKDOWN)
         return await q.edit_message_text(ff_menu_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_ff_menu(context))
 
     if data.startswith("manual:ff:add:"):
@@ -1746,6 +1783,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await q.edit_message_text(ff_menu_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_ff_menu(context))
 
     if data == "manual:ff:checkout":
+        if not manual_open_now() and not is_admin_any(update.effective_user.id):
+            return await q.edit_message_text("⛔ الشحن اليدوي مغلق الآن.\n\n" + manual_hours_text(), parse_mode=ParseMode.MARKDOWN)
+
         cart = _ff_cart_get(context)
         total_price, _, lines = _ff_calc_totals(cart)
         if not lines:
@@ -1767,18 +1807,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Admin panel
     # =========================
     if data == "admin:panel":
-        if not is_admin(update.effective_user.id):
+        if not is_admin_any(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
-        return await q.edit_message_text("👑 *Admin Panel*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_panel())
+        return await q.edit_message_text("👑 *Admin Panel*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_panel(update.effective_user.id))
 
     if data == "admin:dash":
-        if not is_admin(update.effective_user.id):
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
-        return await q.edit_message_text(_dashboard_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_panel())
+        return await q.edit_message_text(_dashboard_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_panel(update.effective_user.id))
 
-    # Manual prices view (must enter ST_ADMIN_INPUT)
+    if data == "admin:admins":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        cur.execute("SELECT user_id, role FROM admins ORDER BY role DESC, user_id ASC")
+        rows = cur.fetchall()
+        lines = ["👑 *Admins*\n", "Send:\n`addadmin | user_id`\n`deladmin | user_id`\n"]
+        for uid, role in rows:
+            lines.append(f"• `{uid}` — *{role}*")
+        context.user_data[UD_ADMIN_MODE] = "admins_manage"
+        await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN)
+        return ST_ADMIN_INPUT
+
+    # Manual prices view
     if data == "admin:manualprices":
-        if not is_admin(update.effective_user.id):
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
         cur.execute("SELECT pkey, price FROM manual_prices ORDER BY pkey")
         rows = cur.fetchall()
@@ -1786,7 +1838,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines = ["🛠 *Manual Prices*\nSend: `key | price`\nExample: `FF_100 | 0.95`\n"]
         for k, p in rows:
             lines.append(f"• `{k}` = *{float(p):.3f}{CURRENCY}*")
-        lines.append("\nKeys: `SHAHID_MENA_3M`, `SHAHID_MENA_12M`, `FF_100`, `FF_210`, `FF_530`, `FF_1080`, `FF_2200`")
+        lines.append("\nKeys: SHAHID_MENA_3M, SHAHID_MENA_12M, FF_100, FF_210, FF_530, FF_1080, FF_2200")
 
         context.user_data[UD_ADMIN_MODE] = "setmanualprice"
         await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN)
@@ -1794,7 +1846,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Customers list
     if data.startswith("admin:users:"):
-        if not is_admin(update.effective_user.id):
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
         page = int(data.split(":")[2])
         rows, total_pages = _users_page(page=page, page_size=10)
@@ -1802,46 +1854,40 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_users_page(page, total_pages, rows))
 
     if data.startswith("admin:user:view:"):
-        if not is_admin(update.effective_user.id):
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
         uid = int(data.split(":")[3])
         rep = _user_report_text(uid, limit_each=7)[:3800]
-        return await q.edit_message_text(rep, reply_markup=kb_admin_user_view(uid))
+        cur.execute("SELECT suspended FROM users WHERE user_id=?", (uid,))
+        s = int((cur.fetchone() or (0,))[0] or 0)
+        return await q.edit_message_text(rep, reply_markup=kb_admin_user_view(uid, s))
 
-    # ✅ Toggle suspend / unsuspend (admin only, cannot suspend ADMIN_ID)
     if data.startswith("admin:user:suspend:"):
-        if not is_admin(update.effective_user.id):
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
-        target_uid = int(data.split(":")[3])
+        uid = int(data.split(":")[3])
+        if is_admin_any(uid) or uid == ADMIN_ID:
+            return await q.edit_message_text("❌ لا يمكن تعليق الأدمن.")
+        set_suspended(uid, True)
+        try:
+            await context.bot.send_message(uid, "⛔ تم تعليق حسابك. تواصل مع الدعم.")
+        except Exception:
+            pass
+        return await q.edit_message_text(f"✅ User {uid} suspended.", reply_markup=kb_admin_panel(update.effective_user.id))
 
-        if target_uid == ADMIN_ID:
-            await q.answer("❌ Cannot suspend admin", show_alert=True)
-            rep = _user_report_text(target_uid, limit_each=7)[:3800]
-            return await q.edit_message_text(rep, reply_markup=kb_admin_user_view(target_uid))
-
-        if is_suspended(target_uid):
-            cur.execute("UPDATE users SET suspended=0, suspended_reason=NULL, suspended_at=NULL WHERE user_id=?", (target_uid,))
-            con.commit()
-            try:
-                await context.bot.send_message(chat_id=target_uid, text="✅ تم رفع تعليق حسابك. يمكنك استخدام البوت الآن.")
-            except Exception:
-                pass
-        else:
-            cur.execute(
-                "UPDATE users SET suspended=1, suspended_reason=?, suspended_at=datetime('now') WHERE user_id=?",
-                ("", target_uid),
-            )
-            con.commit()
-            try:
-                await context.bot.send_message(chat_id=target_uid, text="⛔ تم تعليق حسابك. تواصل مع الدعم.")
-            except Exception:
-                pass
-
-        rep = _user_report_text(target_uid, limit_each=7)[:3800]
-        return await q.edit_message_text(rep, reply_markup=kb_admin_user_view(target_uid))
+    if data.startswith("admin:user:unsuspend:"):
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        uid = int(data.split(":")[3])
+        set_suspended(uid, False)
+        try:
+            await context.bot.send_message(uid, "✅ تم فك تعليق حسابك. يمكنك استخدام البوت الآن.")
+        except Exception:
+            pass
+        return await q.edit_message_text(f"✅ User {uid} unsuspended.", reply_markup=kb_admin_panel(update.effective_user.id))
 
     if data.startswith("admin:user:export:"):
-        if not is_admin(update.effective_user.id):
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
         uid = int(data.split(":")[3])
         rep = _user_report_text(uid, limit_each=30)
@@ -1854,9 +1900,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.answer("Sent ✅", show_alert=False)
         return
 
-    # Manual Orders list
+    # Manual Orders list (Owner + Helper)
     if data.startswith("admin:manuallist:"):
-        if not is_admin(update.effective_user.id):
+        if not is_manual_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
         page = int(data.split(":")[2])
         page_size = 8
@@ -1878,7 +1924,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         rows = cur.fetchall()
         if not rows:
-            return await q.edit_message_text("📥 No pending manual orders.", reply_markup=kb_admin_panel())
+            return await q.edit_message_text("📥 No pending manual orders.", reply_markup=kb_admin_panel(update.effective_user.id))
 
         buttons = []
         for mid, uid, service, plan_title, price, created_at in rows:
@@ -1896,9 +1942,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return await q.edit_message_text("📥 *Pending Manual Orders:*", parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(buttons))
 
-    # Manual view with copy buttons
     if data.startswith("admin:manual:view:"):
-        if not is_admin(update.effective_user.id):
+        if not is_manual_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
         mid = int(data.split(":")[3])
         cur.execute(
@@ -1944,9 +1989,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb)
 
-    # Copy buttons: send separate message with value in code format
+    # Copy buttons
     if data.startswith("admin:copy:"):
-        if not is_admin(update.effective_user.id):
+        if not is_manual_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
         _, _, kind, mid_s = data.split(":")
         mid = int(mid_s)
@@ -1973,7 +2018,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         try:
             await context.bot.send_message(
-                chat_id=ADMIN_ID,
+                chat_id=update.effective_user.id,
                 text=f"📋 COPY {label} (Manual #{mid})\n`{val}`",
                 parse_mode=ParseMode.MARKDOWN,
             )
@@ -1985,7 +2030,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Manual approve
     if data.startswith("admin:manual:approve:"):
-        if not is_admin(update.effective_user.id):
+        if not is_manual_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
         mid = int(data.split(":")[3])
         cur.execute("SELECT user_id, price, status, service, plan_title FROM manual_orders WHERE id=?", (mid,))
@@ -1996,29 +2041,41 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if status != "PENDING":
             return await q.edit_message_text("❌ This manual order is not pending.")
 
-        cur.execute("UPDATE manual_orders SET status='COMPLETED' WHERE id=?", (mid,))
+        # ✅ store approved_by (admin id) but do not show to client
+        approver_id = update.effective_user.id
+        cur.execute("UPDATE manual_orders SET status='COMPLETED', approved_by=? WHERE id=?", (approver_id, mid))
         con.commit()
 
         try:
             await context.bot.send_message(
                 chat_id=uid,
                 text=(
-                    f"✅ *تم شحن بنجاح!*\n"
+                    "✅ *تم شحن بنجاح!*\n"
                     f"🧾 Manual Order: *#{mid}*\n"
                     f"📦 Service: {plan_title}\n"
                     f"💵 Paid: *{price:.3f} {CURRENCY}*\n\n"
-                    f"شكراً لك ❤️"
+                    "شكراً لك ❤️"
                 ),
                 parse_mode=ParseMode.MARKDOWN,
             )
         except Exception as e:
             logger.exception("Failed to notify user %s about manual approve %s: %s", uid, mid, e)
 
-        return await q.edit_message_text(f"✅ Manual order #{mid} approved.", reply_markup=kb_admin_panel())
+        # notify owner (optional)
+        try:
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"✅ Manual #{mid} approved by admin `{approver_id}`",
+                parse_mode=ParseMode.MARKDOWN,
+            )
+        except Exception:
+            pass
 
-    # Manual reject menu
+        return await q.edit_message_text(f"✅ Manual order #{mid} approved.", reply_markup=kb_admin_panel(update.effective_user.id))
+
+    # Manual reject menu + reason (same as before)
     if data.startswith("admin:manual:rejectmenu:"):
-        if not is_admin(update.effective_user.id):
+        if not is_manual_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
         mid = int(data.split(":")[3])
 
@@ -2026,18 +2083,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Choose reject reason (or custom):",
             reply_markup=InlineKeyboardMarkup(
                 [
-                    [InlineKeyboardButton("🆔 Wrong ID", callback_data=f"admin:manual:reject:{mid}:WRONG_ID")],
-                    [InlineKeyboardButton("🌍 Other Server", callback_data=f"admin:manual:reject:{mid}:OTHER_SERVER")],
-                    [InlineKeyboardButton("⏳ Not Available", callback_data=f"admin:manual:reject:{mid}:NOT_AVAILABLE")],
+                    [InlineKeyboardButton("🟥 Wrong ID", callback_data=f"admin:manual:reject:{mid}:WRONG_ID")],
+                    [InlineKeyboardButton("🟦 Other Server", callback_data=f"admin:manual:reject:{mid}:OTHER_SERVER")],
+                    [InlineKeyboardButton("🟨 Not Available", callback_data=f"admin:manual:reject:{mid}:NOT_AVAILABLE")],
                     [InlineKeyboardButton("✍️ Custom", callback_data=f"admin:manual:reject:{mid}:CUSTOM")],
                     [InlineKeyboardButton("⬅️ Back", callback_data=f"admin:manual:view:{mid}")],
                 ]
             ),
         )
 
-    # Manual reject reason
     if data.startswith("admin:manual:reject:"):
-        if not is_admin(update.effective_user.id):
+        if not is_manual_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
         _, _, _, mid_s, reason = data.split(":")
         mid = int(mid_s)
@@ -2049,9 +2105,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ST_ADMIN_INPUT
 
         reason_map = {
-            "WRONG_ID": "❌ تم الرفض: 🆔 الايدي غير صحيح.",
-            "OTHER_SERVER": "❌ تم الرفض: 🌍 الايدي من سيرفر/منطقة أخرى.",
-            "NOT_AVAILABLE": "❌ تم الرفض: ⏳ الخدمة غير متاحة حالياً.",
+            "WRONG_ID": "❌ تم الرفض: 🟥 الايدي خطأ.",
+            "OTHER_SERVER": "❌ تم الرفض: 🟦 الايدي من سيرفر/منطقة أخرى.",
+            "NOT_AVAILABLE": "❌ تم الرفض: 🟨 الخدمة غير متاحة حالياً.",
         }
         reason_text = reason_map.get(reason, "❌ Rejected.")
 
@@ -2084,12 +2140,29 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.exception("Failed to notify user %s about manual reject %s: %s", uid, mid, e)
 
-        return await q.edit_message_text(f"✅ Manual order #{mid} rejected + refunded.", reply_markup=kb_admin_panel())
+        return await q.edit_message_text(f"✅ Manual order #{mid} rejected + refunded.", reply_markup=kb_admin_panel(update.effective_user.id))
 
-    # Admin generic modes entry
+    # Admin generic modes entry (Owner only)
     if data.startswith("admin:"):
-        if not is_admin(update.effective_user.id):
+        if not is_admin_any(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
+
+        # helpers are limited
+        if admin_role(update.effective_user.id) == ROLE_HELPER:
+            # allowed only manuallist/manual view/approve/reject/copy/panel
+            allowed_prefixes = (
+                "admin:panel",
+                "admin:manuallist",
+                "admin:manual:",
+                "admin:copy:",
+            )
+            if not any(data.startswith(x) for x in allowed_prefixes):
+                return await q.edit_message_text("❌ Not allowed.")
+
+        # Owner-only actions below
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+
         mode = data.split(":", 1)[1]
         context.user_data[UD_ADMIN_MODE] = mode
 
@@ -2143,7 +2216,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cid = int(data.split(":", 2)[2])
         return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
 
-    # View (with official url + instructions)
+    # View
     if data.startswith("view:"):
         pid = int(data.split(":", 1)[1])
         cur.execute("SELECT title, price, cid FROM products WHERE pid=? AND active=1", (pid,))
@@ -2153,40 +2226,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title, price, cid = row
         stock = product_stock(pid)
 
-        guide = get_product_guide_by_cid(cid)
-        redeem_url = guide.get("redeem_url", "")
-        validity = guide.get("validity", "")
-        region = guide.get("region", "")
-        steps = guide.get("redeem_steps", [])
-
-        desc_lines = []
-        if validity:
-            desc_lines.append(f"📝 *الوصف:*\n{validity}")
-        if redeem_url:
-            desc_lines.append("\n🔗 *الموقع الرسمي:*")
-            desc_lines.append(redeem_url)
-        if steps:
-            desc_lines.append("\n*للاسترداد:*")
-            for s in steps:
-                desc_lines.append(f"• {s}")
-        if region:
-            desc_lines.append(f"\n🌍 *المنطقة:* {region}")
-
-        desc_block = "\n".join(desc_lines).strip()
-
         text = (
-            f"🛒 *{title}*\n\n"
+            f"🎁 *{title}*\n\n"
             f"🆔 ID: `{pid}`\n"
-            f"💵 السعر: *{float(price):.3f}* {CURRENCY}\n"
-            f"📦 المخزون: *{stock}*\n\n"
-            f"{desc_block}"
-        ).strip()
-
-        return await q.edit_message_text(
-            text[:3800],
-            parse_mode=ParseMode.MARKDOWN,
-            reply_markup=kb_product_view(pid, cid, redeem_url),
+            f"💵 Price: *{float(price):.3f}* {CURRENCY}\n"
+            f"📦 Stock: *{stock}*"
         )
+        return await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_product_view(pid, cid))
 
     # Buy -> qty
     if data.startswith("buy:"):
@@ -2213,7 +2259,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return ST_QTY
 
-    # Confirm purchase (✅ protected from double click)
+    # Confirm purchase
     if data.startswith("confirm:"):
         parts = data.split(":")
         pid = int(parts[1]) if len(parts) > 1 else 0
@@ -2382,12 +2428,13 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Admin input (text + file)
 # =========================
 async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    uid_admin = update.effective_user.id
+    if not is_admin_any(uid_admin):
         return ConversationHandler.END
 
     mode = context.user_data.get(UD_ADMIN_MODE)
 
-    # ✅ allow menu buttons + exit texts while in admin mode
+    # allow exit + menu
     if update.message and update.message.text:
         t = update.message.text.strip()
         if t in MENU_BUTTONS:
@@ -2403,10 +2450,45 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
             return ConversationHandler.END
 
+    # helper limitation
+    if admin_role(uid_admin) == ROLE_HELPER:
+        if mode not in ("manual_reject_custom",):
+            await update.message.reply_text("❌ Not allowed.")
+            return ConversationHandler.END
+
     text = (update.message.text or "").strip() if update.message else ""
 
     try:
-        # Custom manual reject reason
+        if mode == "admins_manage":
+            if admin_role(uid_admin) != ROLE_OWNER:
+                await update.message.reply_text("❌ Not allowed.")
+                return ConversationHandler.END
+
+            m = re.match(r"^(addadmin|deladmin)\s*\|\s*(\d+)$", text.strip().lower())
+            if not m:
+                await update.message.reply_text("❌ Format:\naddadmin | user_id\nor\ndeladmin | user_id")
+                return ST_ADMIN_INPUT
+            cmd, target_s = m.group(1), m.group(2)
+            target = int(target_s)
+
+            if cmd == "addadmin":
+                if target == ADMIN_ID:
+                    await update.message.reply_text("✅ Owner already admin.")
+                    return ConversationHandler.END
+                cur.execute("INSERT OR REPLACE INTO admins(user_id, role) VALUES(?,?)", (target, ROLE_HELPER))
+                con.commit()
+                await update.message.reply_text(f"✅ Added helper admin: {target}")
+                return ConversationHandler.END
+
+            if cmd == "deladmin":
+                if target == ADMIN_ID:
+                    await update.message.reply_text("❌ Cannot delete owner.")
+                    return ConversationHandler.END
+                cur.execute("DELETE FROM admins WHERE user_id=? AND role!=?", (target, ROLE_OWNER))
+                con.commit()
+                await update.message.reply_text(f"✅ Removed admin: {target}")
+                return ConversationHandler.END
+
         if mode == "manual_reject_custom":
             mid = int(context.user_data.get(UD_ADMIN_MANUAL_ID, 0))
             reason_text = (update.message.text or "").strip()
@@ -2437,8 +2519,8 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(
                     chat_id=uid,
                     text=(
-                        f"❌ تم رفض طلبك اليدوي #{mid}.\n"
-                        f"السبب: {reason_text}\n\n"
+                        f"❌ Your manual order #{mid} was rejected.\n"
+                        f"Reason: {reason_text}\n\n"
                         f"Refunded: +{price:.3f} {CURRENCY}\n"
                         f"💳 Balance before: {bal_before:.3f} {CURRENCY}\n"
                         f"✅ Balance after: {bal_after:.3f} {CURRENCY}\n"
@@ -2450,8 +2532,10 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop(UD_ADMIN_MANUAL_ID, None)
             return ConversationHandler.END
 
-        # Manual prices set
         if mode == "setmanualprice":
+            if admin_role(uid_admin) != ROLE_OWNER:
+                await update.message.reply_text("❌ Not allowed.")
+                return ConversationHandler.END
             m = re.match(r"^([A-Z0-9_]+)\s*\|\s*([\d.]+)$", text)
             if not m:
                 await update.message.reply_text("❌ Format: KEY | PRICE\nExample: FF_100 | 0.95")
@@ -2467,7 +2551,10 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ Manual price updated: {key} = {price:.3f}{CURRENCY}")
             return ConversationHandler.END
 
-        # Delete product
+        if admin_role(uid_admin) != ROLE_OWNER:
+            await update.message.reply_text("❌ Not allowed.")
+            return ConversationHandler.END
+
         if mode == "delprod":
             if not text.isdigit():
                 await update.message.reply_text("❌ Send PID number only.\nExample: 12")
@@ -2485,7 +2572,6 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"✅ Deleted product PID {pid}\nTitle: {title}")
             return ConversationHandler.END
 
-        # Delete category FULL
         if mode == "delcatfull":
             inp = text
             if not inp:
@@ -2561,47 +2647,38 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("✅ Product added.")
             return ConversationHandler.END
 
-        # ✅ Add codes (text) with FF/PUBG rules
         if mode == "addcodes":
             if "|" not in text:
                 await update.message.reply_text("❌ Missing '|'.\nExample:\n12 | CODE1\nCODE2")
                 return ST_ADMIN_INPUT
             pid_s, codes_blob = [x.strip() for x in text.split("|", 1)]
             if not pid_s.isdigit():
-                await update.message.reply_text("❌ PID لازم يكون رقم.")
+                await update.message.reply_text("❌ PID must be a number.")
                 return ST_ADMIN_INPUT
             pid = int(pid_s)
-
             codes = [c.strip() for c in codes_blob.splitlines() if c.strip()]
             if not codes:
                 await update.message.reply_text("❌ No codes.")
                 return ConversationHandler.END
 
-            added, skipped, invalid = 0, 0, 0
-            invalid_samples = []
+            ok, msg = validate_codes_for_pid(pid, codes)
+            if not ok:
+                await update.message.reply_text(msg)
+                return ConversationHandler.END
 
+            added = 0
+            skipped = 0
             for ctext in codes:
-                ok, err = validate_code_for_pid(pid, ctext)
-                if not ok:
-                    invalid += 1
-                    if len(invalid_samples) < 5:
-                        invalid_samples.append(err)
-                    continue
+                ctext = ctext.strip().replace(" ", "")
                 try:
                     cur.execute("INSERT INTO codes(pid,code_text,used) VALUES(?,?,0)", (pid, ctext))
                     added += 1
                 except sqlite3.IntegrityError:
                     skipped += 1
-
             con.commit()
-
-            msg = f"✅ Added {added} codes to PID {pid}.\n♻️ Skipped duplicates: {skipped}\n❌ Invalid: {invalid}"
-            if invalid_samples:
-                msg += "\n\n" + "\n".join(dict.fromkeys(invalid_samples))
-            await update.message.reply_text(msg[:3800])
+            await update.message.reply_text(f"✅ Added {added} codes to PID {pid}.\n♻️ Skipped duplicates: {skipped}")
             return ConversationHandler.END
 
-        # ✅ Add codes file with FF/PUBG rules
         if mode == "addcodesfile":
             if update.message.text and not update.message.document:
                 pid_txt = update.message.text.strip()
@@ -2632,34 +2709,28 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raw = await file.download_as_bytearray()
             content = raw.decode("utf-8", errors="ignore")
 
-            codes = [c.strip() for c in content.splitlines() if c.strip()]
+            codes = [c.strip().replace(" ", "") for c in content.splitlines() if c.strip()]
             if not codes:
                 await update.message.reply_text("❌ File has no codes.")
                 return ConversationHandler.END
 
-            added, skipped, invalid = 0, 0, 0
-            invalid_samples = []
+            ok, msg = validate_codes_for_pid(pid, codes)
+            if not ok:
+                await update.message.reply_text(msg)
+                return ConversationHandler.END
 
+            added = 0
+            skipped = 0
             for ctext in codes:
-                ok, err = validate_code_for_pid(pid, ctext)
-                if not ok:
-                    invalid += 1
-                    if len(invalid_samples) < 5:
-                        invalid_samples.append(err)
-                    continue
                 try:
                     cur.execute("INSERT INTO codes(pid,code_text,used) VALUES(?,?,0)", (pid, ctext))
                     added += 1
                 except sqlite3.IntegrityError:
                     skipped += 1
-
             con.commit()
-            context.user_data.pop(UD_ADMIN_CODES_PID, None)
 
-            msg = f"✅ Added {added} codes to PID {pid} from file.\n♻️ Skipped duplicates: {skipped}\n❌ Invalid: {invalid}"
-            if invalid_samples:
-                msg += "\n\n" + "\n".join(dict.fromkeys(invalid_samples))
-            await update.message.reply_text(msg[:3800])
+            context.user_data.pop(UD_ADMIN_CODES_PID, None)
+            await update.message.reply_text(f"✅ Added {added} codes to PID {pid} from file.\n♻️ Skipped duplicates: {skipped}")
             return ConversationHandler.END
 
         if mode == "setprice":
@@ -2788,13 +2859,13 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Admin commands
 # =========================
 async def admin_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if not is_admin_any(update.effective_user.id):
         return await update.message.reply_text("❌ Not allowed.")
-    await update.message.reply_text("👑 Admin Panel", reply_markup=kb_admin_panel())
+    await update.message.reply_text("👑 Admin Panel", reply_markup=kb_admin_panel(update.effective_user.id))
 
 
 async def approvedep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if admin_role(update.effective_user.id) != ROLE_OWNER:
         return
     if not context.args:
         return await update.message.reply_text("Usage: /approvedep <deposit_id>")
@@ -2804,7 +2875,7 @@ async def approvedep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def rejectdep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
+    if admin_role(update.effective_user.id) != ROLE_OWNER:
         return
     if not context.args:
         return await update.message.reply_text("Usage: /rejectdep <deposit_id>")
@@ -2826,30 +2897,12 @@ def build_app():
             CallbackQueryHandler(on_callback, pattern=CB_PATTERN)
         ],
         states={
-            ST_QTY: [
-                MessageHandler(filters.TEXT, qty_input),
-                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
-            ],
-            ST_TOPUP_DETAILS: [
-                MessageHandler(filters.TEXT, topup_details_input),
-                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
-            ],
-            ST_ADMIN_INPUT: [
-                MessageHandler(filters.TEXT | filters.Document.ALL, admin_input),
-                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
-            ],
-            ST_MANUAL_EMAIL: [
-                MessageHandler(filters.TEXT, manual_email_input),
-                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
-            ],
-            ST_MANUAL_PASS: [
-                MessageHandler(filters.TEXT, manual_pass_input),
-                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
-            ],
-            ST_FF_PLAYERID: [
-                MessageHandler(filters.TEXT, ff_playerid_input),
-                CallbackQueryHandler(on_callback, pattern=CB_PATTERN),
-            ],
+            ST_QTY: [MessageHandler(filters.TEXT, qty_input), CallbackQueryHandler(on_callback, pattern=CB_PATTERN)],
+            ST_TOPUP_DETAILS: [MessageHandler(filters.TEXT, topup_details_input), CallbackQueryHandler(on_callback, pattern=CB_PATTERN)],
+            ST_ADMIN_INPUT: [MessageHandler(filters.TEXT | filters.Document.ALL, admin_input), CallbackQueryHandler(on_callback, pattern=CB_PATTERN)],
+            ST_MANUAL_EMAIL: [MessageHandler(filters.TEXT, manual_email_input), CallbackQueryHandler(on_callback, pattern=CB_PATTERN)],
+            ST_MANUAL_PASS: [MessageHandler(filters.TEXT, manual_pass_input), CallbackQueryHandler(on_callback, pattern=CB_PATTERN)],
+            ST_FF_PLAYERID: [MessageHandler(filters.TEXT, ff_playerid_input), CallbackQueryHandler(on_callback, pattern=CB_PATTERN)],
         },
         fallbacks=[CommandHandler("start", start_cmd)],
         allow_reentry=True,
