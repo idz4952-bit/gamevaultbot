@@ -1080,13 +1080,20 @@ async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, rng: s
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_orders_filters(page, total_pages))
 
 
+from telegram.helpers import escape_markdown
+
+def md(x: str) -> str:
+    return escape_markdown(x or "", version=1)
+
 async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "☎️ *Support*\n\n"
-        f"📞 Phone: `{SUPPORT_PHONE}`\n"
-        f"💬 Chat: {SUPPORT_CHAT}\n\n"
+        f"📞 Phone: `{md(SUPPORT_PHONE)}`\n"
+        f"💬 Chat: {md(SUPPORT_CHAT)}\n"
+        f"📣 Channel: {md(SUPPORT_CHANNEL)}\n\n"
         "اختر 👇"
     )
+    ...
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_support())
     else:
