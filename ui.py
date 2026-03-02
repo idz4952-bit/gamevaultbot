@@ -1,5 +1,5 @@
 # ui.py
-import re
+import io
 from typing import List, Tuple, Dict, Optional
 
 from telegram import (
@@ -8,19 +8,12 @@ from telegram import (
     ReplyKeyboardMarkup,
     KeyboardButton,
 )
+from telegram.constants import ParseMode
+from telegram.ext import ContextTypes
 from telegram.helpers import escape_markdown
 
+import config
 import db
-from config import (
-    CURRENCY,
-    HIDDEN_CATEGORIES,
-    to_tme,
-    SUPPORT_PHONE,
-    SUPPORT_CHANNEL,
-    extract_sort_value,
-    manual_hours_text,
-)
-from db import get_manual_price, MANUAL_PRICE_DEFAULTS
 
 # =========================
 # Reply Menu
@@ -53,17 +46,72 @@ ADMIN_TEXT_EXIT = {
     "إلغاء",
 }
 
-def md(x: str) -> str:
-    return escape_markdown(x or "", version=1)
-
-def money3(x: float) -> str:
-    return f"{x:.3f} {CURRENCY}"
-
 # =========================
-# Delivery limits
+# Delivery
 # =========================
 MAX_CODES_IN_MESSAGE = 200
 TELEGRAM_TEXT_LIMIT = 3800
+
+
+async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, order_id: int, codes: List[str]):
+    codes = [c.strip() for c in codes if c and c.strip()]
+    count = len(codes)
+
+    header = f"🎁 *Delivery Successful!*\n✅ Order *#{order_id}* COMPLETED\n📦 Codes: *{count}*\n\n"
+    if count == 0:
+        await context.bot.send_message(chat_id=chat_id, text=f"✅ Order #{order_id} COMPLETED\n(No codes)")
+        return
+
+    if count > MAX_CODES_IN_MESSAGE:
+        content = "\n".join(codes)
+        bio = io.BytesIO(content.encode("utf-8"))
+        bio.name = f"order_{order_id}_codes.txt"
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=header + "📎 *Your codes are attached in a file:*",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        await context.bot.send_document(chat_id=chat_id, document=bio)
+        return
+
+    body = "\n".join(codes)
+    text = header + f"`{body}`"
+    if len(text) <= TELEGRAM_TEXT_LIMIT:
+        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+        return
+
+    await context.bot.send_message(chat_id=chat_id, text=header + "🎁 Codes (part 1):", parse_mode=ParseMode.MARKDOWN)
+    chunk = ""
+    for c in codes:
+        line = c + "\n"
+        if len(chunk) + len(line) > TELEGRAM_TEXT_LIMIT:
+            await context.bot.send_message(chat_id=chat_id, text=f"`{chunk.rstrip()}`", parse_mode=ParseMode.MARKDOWN)
+            chunk = line
+        else:
+            chunk += line
+    if chunk.strip():
+        await context.bot.send_message(chat_id=chat_id, text=f"`{chunk.rstrip()}`", parse_mode=ParseMode.MARKDOWN)
+
+
+# =========================
+# Helpers
+# =========================
+def md(x: str) -> str:
+    return escape_markdown(x or "", version=1)
+
+
+def smart_reply(msg: str) -> Optional[str]:
+    m = (msg or "").lower()
+    if any(x in m for x in ["price", "سعر", "كم", "ثمن"]):
+        return "💡 الأسعار تظهر داخل 🛒 Our Products → اختر القسم."
+    if any(x in m for x in ["balance", "رصيد", "wallet", "محفظة"]):
+        return "💡 اضغط 💰 My Balance لمشاهدة الرصيد وطرق الشحن."
+    if any(x in m for x in ["order", "طلب", "orders", "طلباتي"]):
+        return "💡 اضغط 📦 My Orders لمشاهدة الطلبات."
+    if any(x in m for x in ["usdt", "trc20", "bep20", "txid"]):
+        return "💡 من 💰 My Balance اختر طريقة الشحن ثم اضغط ✅ I Have Paid وأرسل Amount | TXID."
+    return None
+
 
 # =========================
 # Keyboards
@@ -80,7 +128,7 @@ def kb_categories(is_admin_user: bool) -> InlineKeyboardMarkup:
     )
     rows = []
     for cid, title, cnt in db.cur.fetchall():
-        if title in HIDDEN_CATEGORIES:
+        if title in config.HIDDEN_CATEGORIES:
             continue
         rows.append([InlineKeyboardButton(f"{title} | {cnt}", callback_data=f"cat:{cid}")])
 
@@ -89,23 +137,21 @@ def kb_categories(is_admin_user: bool) -> InlineKeyboardMarkup:
 
     return InlineKeyboardMarkup(rows)
 
-def product_stock(pid: int) -> int:
-    db.cur.execute("SELECT COUNT(*) FROM codes WHERE pid=? AND used=0", (pid,))
-    return int(db.cur.fetchone()[0])
 
 def kb_products(cid: int) -> InlineKeyboardMarkup:
     db.cur.execute("SELECT pid,title,price FROM products WHERE cid=? AND active=1", (cid,))
     items = db.cur.fetchall()
-    items.sort(key=lambda r: extract_sort_value(r[1]))
+    items.sort(key=lambda r: config.extract_sort_value(r[1]))
 
     rows = []
     for pid, title, price in items:
-        stock = product_stock(pid)
-        label = f"{title} | {money3(float(price))} | 📦{stock}"
+        stock = db.product_stock(pid)
+        label = f"{title} | {config.money(float(price))} | 📦{stock}"
         rows.append([InlineKeyboardButton(label[:62], callback_data=f"view:{pid}")])
 
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back:cats")])
     return InlineKeyboardMarkup(rows)
+
 
 def kb_product_view(pid: int, cid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -114,6 +160,7 @@ def kb_product_view(pid: int, cid: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("⬅️ Back", callback_data=f"back:prods:{cid}")],
         ]
     )
+
 
 def kb_balance_methods() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
@@ -129,6 +176,7 @@ def kb_balance_methods() -> InlineKeyboardMarkup:
         ]
     )
 
+
 def kb_have_paid(dep_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -137,6 +185,7 @@ def kb_have_paid(dep_id: int) -> InlineKeyboardMarkup:
         ]
     )
 
+
 def kb_topup_now() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -144,6 +193,7 @@ def kb_topup_now() -> InlineKeyboardMarkup:
             [InlineKeyboardButton("⬅️ Back", callback_data="back:cats")],
         ]
     )
+
 
 def kb_orders_filters(page: int, total_pages: int) -> InlineKeyboardMarkup:
     nav_row = []
@@ -164,120 +214,152 @@ def kb_orders_filters(page: int, total_pages: int) -> InlineKeyboardMarkup:
         ]
     )
 
+
 def kb_support() -> InlineKeyboardMarkup:
     rows = [
-        [InlineKeyboardButton("💬 Support", url=to_tme(SUPPORT_PHONE))],
-        [InlineKeyboardButton("📣 Support Channel", url=to_tme(SUPPORT_CHANNEL))],
+        [InlineKeyboardButton("💬 Support Chat", url=config.to_tme(config.SUPPORT_PHONE))],
+        [InlineKeyboardButton("📣 Support Channel", url=config.to_tme(config.SUPPORT_CHANNEL))],
     ]
     return InlineKeyboardMarkup(rows)
 
-# =========================
-# Manual Order (Shahid + FreeFire MENA Cart)
-# =========================
-FF_PACKS = [
-    ("FF_100", "100+10", 110),
-    ("FF_210", "210+21", 231),
-    ("FF_530", "530+53", 583),
-    ("FF_1080", "1080+108", 1188),
-    ("FF_2200", "2200+220", 2420),
-]
 
-def _ff_pack(sku: str):
-    for x in FF_PACKS:
-        if x[0] == sku:
-            return x
-    return None
-
-def kb_manual_services() -> InlineKeyboardMarkup:
+def kb_qty_cancel(cid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("📺 Shahid", callback_data="manual:shahid")],
-            [InlineKeyboardButton("💎 Free Fire (MENA)", callback_data="manual:ff")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="goto:cats")],
-        ]
-    )
-
-def kb_shahid_plans() -> InlineKeyboardMarkup:
-    p3 = get_manual_price("SHAHID_MENA_3M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_3M"])
-    p12 = get_manual_price("SHAHID_MENA_12M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_12M"])
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton(f"Shahid [MENA] | 3 Month | {p3:.3f}{CURRENCY}", callback_data="manual:shahid:MENA_3M")],
-            [InlineKeyboardButton(f"Shahid [MENA] | 12 Month | {p12:.3f}{CURRENCY}", callback_data="manual:shahid:MENA_12M")],
-            [InlineKeyboardButton("⬅️ Back", callback_data="manual:services")],
+            [InlineKeyboardButton("⬅️ Back", callback_data=f"back:prods:{cid}")],
             [InlineKeyboardButton("❌ Cancel", callback_data="goto:cats")],
         ]
     )
 
-def ff_menu_text() -> str:
-    return (
-        "💎 *Free Fire (MENA)*\n\n"
-        "🛒 Add packs to cart ثم Checkout.\n"
-        "⏱ Delivery: *1-5 minutes*\n\n"
-        "✅ تقدر تمسح السلة أو تكمل الدفع\n\n"
-        + manual_hours_text()
+
+def kb_admin_panel(uid: int) -> InlineKeyboardMarkup:
+    if db.admin_role(uid) == config.ROLE_HELPER:
+        return InlineKeyboardMarkup([[InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0")]])
+
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📊 Dashboard", callback_data="admin:dash"),
+                InlineKeyboardButton("👥 Customers", callback_data="admin:users:0"),
+            ],
+            [
+                InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0"),
+                InlineKeyboardButton("💰 Deposits", callback_data="admin:deps:0"),
+            ],
+            [
+                InlineKeyboardButton("📋 Products (PID)", callback_data="admin:listprod"),
+                InlineKeyboardButton("⛔ Toggle Product", callback_data="admin:toggle"),
+            ],
+            [
+                InlineKeyboardButton("🗑 Delete Product", callback_data="admin:delprod"),
+                InlineKeyboardButton("🗑 Delete Category (FULL)", callback_data="admin:delcatfull"),
+            ],
+            [
+                InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat"),
+                InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod"),
+            ],
+            [
+                InlineKeyboardButton("➕ Add Codes (text)", callback_data="admin:addcodes"),
+                InlineKeyboardButton("📄 Add Codes (file)", callback_data="admin:addcodesfile"),
+            ],
+            [
+                InlineKeyboardButton("💲 Set Price", callback_data="admin:setprice"),
+                InlineKeyboardButton("🛠 Manual Prices", callback_data="admin:manualprices"),
+            ],
+            [
+                InlineKeyboardButton("➕ Add Balance", callback_data="admin:addbal"),
+                InlineKeyboardButton("➖ Take Balance", callback_data="admin:takebal"),
+            ],
+            [
+                InlineKeyboardButton("👑 Admins", callback_data="admin:admins"),
+            ],
+        ]
     )
 
-def _ff_cart_get(context):
-    cart = context.user_data.get("ff_cart")
-    if not isinstance(cart, dict):
-        cart = {}
-        context.user_data["ff_cart"] = cart
-    return cart
 
-def _ff_calc_totals(cart: Dict[str, int]):
-    total_price = 0.0
-    total_diamonds = 0
-    lines = []
-    for sku, qty in cart.items():
-        if qty <= 0:
-            continue
-        pack = _ff_pack(sku)
-        if not pack:
-            continue
-        _, title, diamonds = pack
-        price = get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0))
-        total_price += float(price) * qty
-        total_diamonds += diamonds * qty
-        lines.append((title, qty, float(price), diamonds))
-
-    order_map = {t: i for i, (_, t, _) in enumerate(FF_PACKS)}
-    lines.sort(key=lambda x: order_map.get(x[0], 999))
-    return total_price, total_diamonds, lines
-
-def kb_ff_menu(context) -> InlineKeyboardMarkup:
-    cart = _ff_cart_get(context)
+def kb_admin_manual_view(mid: int, service: str, has_email: bool, has_pass: bool, has_player: bool) -> InlineKeyboardMarkup:
     rows = []
-    for sku, title, _ in FF_PACKS:
-        qty = int(cart.get(sku, 0))
-        suffix = f"  🧺[{qty}]" if qty > 0 else ""
-        price = get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0))
-        rows.append([InlineKeyboardButton(f"{title} 💎 | {float(price):.3f}{CURRENCY}{suffix}", callback_data=f"manual:ff:add:{sku}")])
 
-    rows.append([InlineKeyboardButton("🗑 Clear Cart", callback_data="manual:ff:clear")])
-    rows.append([InlineKeyboardButton("✅ Proceed to Checkout", callback_data="manual:ff:checkout")])
-    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="manual:services")])
-    rows.append([InlineKeyboardButton("❌ Cancel", callback_data="goto:cats")])
+    copy_row = []
+    if has_player:
+        copy_row.append(InlineKeyboardButton("📋 Copy Player ID", callback_data=f"admin:copy:player:{mid}"))
+    if has_email:
+        copy_row.append(InlineKeyboardButton("📋 Copy Email", callback_data=f"admin:copy:email:{mid}"))
+    if has_pass:
+        copy_row.append(InlineKeyboardButton("📋 Copy Password", callback_data=f"admin:copy:pass:{mid}"))
+    if copy_row:
+        rows.append(copy_row)
+
+    rows.append(
+        [
+            InlineKeyboardButton("✅ Approve ✅", callback_data=f"admin:manual:approve:{mid}"),
+            InlineKeyboardButton("🚫 Reject 🚫", callback_data=f"admin:manual:rejectmenu:{mid}"),
+        ]
+    )
+
+    if service == "FREEFIRE_MENA":
+        rows.append(
+            [
+                InlineKeyboardButton("🟥 Wrong ID", callback_data=f"admin:manual:reject:{mid}:WRONG_ID"),
+                InlineKeyboardButton("🟦 Other Server", callback_data=f"admin:manual:reject:{mid}:OTHER_SERVER"),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton("🟨 Not Available", callback_data=f"admin:manual:reject:{mid}:NOT_AVAILABLE"),
+                InlineKeyboardButton("✍️ Custom", callback_data=f"admin:manual:reject:{mid}:CUSTOM"),
+            ]
+        )
+    else:
+        rows.append([InlineKeyboardButton("✍️ Custom Reject", callback_data=f"admin:manual:reject:{mid}:CUSTOM")])
+
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="admin:manuallist:0")])
+    rows.append([InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")])
     return InlineKeyboardMarkup(rows)
 
-def ff_checkout_text(context) -> str:
-    cart = _ff_cart_get(context)
-    total_price, total_diamonds, lines = _ff_calc_totals(cart)
-    if not lines:
-        return "🛒 Cart is empty.\nAdd items first."
 
-    text_lines = ["🧺 *Your Cart — Free Fire* ⚡\n"]
-    for title, qty, _, _ in lines:
-        text_lines.append(f"💎 {title} (x{qty})")
+def kb_admin_users_page(page: int, total_pages: int, rows: List[Tuple]) -> InlineKeyboardMarkup:
+    buttons = []
+    for uid, username, first_name, bal, oc, osp, mc, msp, dep, suspended in rows:
+        uname = f"@{username}" if username else ""
+        name = first_name or ""
+        sflag = " ⛔" if int(suspended) == 1 else ""
+        label = f"👤 {uid}{sflag} {uname} {name}".strip()
+        sub = f" | 💰{bal:.3f}{config.CURRENCY} | 🧾{oc} | 🔥{osp:.3f}{config.CURRENCY}"
+        text = (label + sub)[:58]
+        buttons.append([InlineKeyboardButton(text, callback_data=f"admin:user:view:{uid}")])
 
-    text_lines.append("")
-    text_lines.append(f"💎 Total Diamonds: *{total_diamonds}*")
-    text_lines.append(f"💰 Total: *{total_price:.3f}{CURRENCY}*")
-    text_lines.append("")
-    text_lines.append("🆔 Send Player ID (NUMBERS only)\n❌ /cancel to stop")
-    return "\n".join(text_lines)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"admin:users:{page-1}"))
+    nav.append(InlineKeyboardButton(f"Page {page+1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"admin:users:{page+1}"))
+    buttons.append(nav)
 
-# تصدير دوال FF للحاجة في bot.py
-ff_cart_get = _ff_cart_get
-ff_calc_totals = _ff_calc_totals
-ff_pack = _ff_pack
+    buttons.append([InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")])
+    return InlineKeyboardMarkup(buttons)
+
+
+def kb_admin_user_view(uid: int, suspended: int) -> InlineKeyboardMarkup:
+    can_suspend = (not db.is_admin_any(uid)) and (uid != config.ADMIN_ID)
+
+    rows = [
+        [
+            InlineKeyboardButton("➕ Add Balance", callback_data=f"admin:user:addbal:{uid}"),
+            InlineKeyboardButton("➖ Take Balance", callback_data=f"admin:user:takebal:{uid}"),
+        ],
+        [
+            InlineKeyboardButton("📄 Export Report", callback_data=f"admin:user:export:{uid}"),
+            InlineKeyboardButton("⬅️ Back", callback_data="admin:users:0"),
+        ],
+    ]
+
+    if can_suspend:
+        if int(suspended) == 1:
+            rows.insert(1, [InlineKeyboardButton("✅ Unsuspend User", callback_data=f"admin:user:unsuspend:{uid}")])
+        else:
+            rows.insert(1, [InlineKeyboardButton("⛔ Suspend User", callback_data=f"admin:user:suspend:{uid}")])
+
+    rows.append([InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")])
+    return InlineKeyboardMarkup(rows)
