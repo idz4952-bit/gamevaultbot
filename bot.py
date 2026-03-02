@@ -1,4 +1,4 @@
-# bot.py
+gv# bot.py
 import os
 import re
 import io
@@ -1089,7 +1089,7 @@ async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "☎️ *Support*\n\n"
         f"📞 Phone: `{md(SUPPORT_PHONE)}`\n"
-        f"💬 Chat: {md(SUPPORT_CHAT)}\n"
+        f"💬 Chat: {md(SUPPORT_PHONE)}\n"
         f"📣 Channel: {md(SUPPORT_CHANNEL)}\n\n"
         "اختر 👇"
     )
