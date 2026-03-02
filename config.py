@@ -141,3 +141,16 @@ UD_ADMIN_CODES_PID = "admin_codes_pid"
 UD_ORDER_CLIENT_REF = "order_client_ref"
 UD_LAST_QTY = "last_qty"
 UD_LAST_PID = "last_pid"
+
+import logging
+import secrets
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+
+logger = logging.getLogger("shopbot")
+
+def new_client_ref():
+    return secrets.token_hex(10)
