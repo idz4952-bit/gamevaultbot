@@ -1072,18 +1072,21 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("cat:"):
         cid = int(data.split(":", 1)[1])
         context.user_data[UD_CID] = cid
-        return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
+        await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
+return ConversationHandler.END
 
     if data.startswith("back:prods:"):
         cid = int(data.split(":", 2)[2])
-        return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
+        await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
+return ConversationHandler.END
 
     if data.startswith("view:"):
         pid = int(data.split(":", 1)[1])
         db.cur.execute("SELECT title, price, cid FROM products WHERE pid=? AND active=1", (pid,))
         row = db.cur.fetchone()
         if not row:
-            return await q.edit_message_text("❌ Product not found.")
+            await q.edit_message_text("❌ Product not found.")
+return ConversationHandler.END
         title, price, cid = row
         stock = db.product_stock(pid)
 
@@ -1100,7 +1103,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         db.cur.execute("SELECT title, cid FROM products WHERE pid=? AND active=1", (pid,))
         row = db.cur.fetchone()
         if not row:
-            return await q.edit_message_text("❌ Product not found.")
+            await q.edit_message_text("❌ Product not found.")
+return ConversationHandler.END
         title, cid = row
         stock = db.product_stock(pid)
         if stock <= 0:
