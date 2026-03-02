@@ -542,7 +542,12 @@ async def topup_details_input(update: Update, context: ContextTypes.DEFAULT_TYPE
             parse_mode=ParseMode.MARKDOWN,
         )
     except Exception as e:
-        logger.exception("Failed to notify admin about deposit %s: %s", dep_id, e)
+        logger.exception("Callback crashed | uid=%s | data=%s | err=%s", uid, data, e)
+        try:
+            await q.answer("حدث خطأ داخل البوت (شوف Logs)", show_alert=True)
+        except Exception:
+            pass
+        return
 
     return ConversationHandler.END
 
@@ -940,6 +945,14 @@ def validate_codes_for_pid(pid: int, codes: List[str]):
 # =========================
 async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
+    data = (q.data or "")
+    uid = update.effective_user.id if update.effective_user else 0
+
+    logger.info("CB from %s | data=%s", uid, data)  # ✅ نعرف الزر وصل ولا لا
+
+    try:
+        await q.answer()
+        # باقي كودك تحت كما هو...
     await q.answer()
     data = q.data or ""
 
@@ -1207,7 +1220,7 @@ async def rejectdep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def build_app():
     app = ApplicationBuilder().token(TOKEN).build()
 
-    CB_PATTERN = r"^(cat:|view:|buy:|confirm:|pay:|paid:|manual:|admin:|orders:|back:|goto:)"
+    CB_PATTERN = r"^(cat:|view:|buy:|confirm:|pay:|paid:|manual:|admin:|orders:|back:|goto:|noop)"
 
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(on_callback, pattern=CB_PATTERN)],
