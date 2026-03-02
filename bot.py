@@ -1065,37 +1065,42 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ملاحظة: هذا الملف طويل جداً؛ إذا ظهر لك أنك تحتاج "باقي البلوك" لأنك تقصّه هنا في الرسالة،
     # قلّي فقط "كمل bot.py" وسأرسله لك مكمل (لن أغيّر أي شيء).
 
-    # Navigation
-    if data == "back:cats":
-        return await show_categories(update, context)
+    # Navigation# Navigation
+if data == "back:cats":
+    await show_categories(update, context)
+    return ConversationHandler.END
 
-    if data.startswith("cat:"):
-        cid = int(data.split(":", 1)[1])
-        context.user_data[UD_CID] = cid
-        await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
-return ConversationHandler.END
-    if data.startswith("back:prods:"):
-        cid = int(data.split(":", 2)[2])
-        await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
-return ConversationHandler.END
+if data.startswith("cat:"):
+    cid = int(data.split(":", 1)[1])
+    context.user_data[UD_CID] = cid
+    await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
+    return ConversationHandler.END
 
-    if data.startswith("view:"):
-        pid = int(data.split(":", 1)[1])
-        db.cur.execute("SELECT title, price, cid FROM products WHERE pid=? AND active=1", (pid,))
-        row = db.cur.fetchone()
-        if not row:
-            await q.edit_message_text("❌ Product not found.")
-return ConversationHandler.END
-        title, price, cid = row
-        stock = db.product_stock(pid)
+if data.startswith("back:prods:"):
+    cid = int(data.split(":", 2)[2])
+    await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
+    return ConversationHandler.END
 
-        text = (
-            f"🎁 *{title}*\n\n"
-            f"🆔 ID: `{pid}`\n"
-            f"💵 Price: *{float(price):.3f}* {CURRENCY}\n"
-            f"📦 Stock: *{stock}*"
-        )
-        return await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_product_view(pid, cid))
+if data.startswith("view:"):
+    pid = int(data.split(":", 1)[1])
+    db.cur.execute("SELECT title, price, cid FROM products WHERE pid=? AND active=1", (pid,))
+    row = db.cur.fetchone()
+
+    if not row:
+        await q.edit_message_text("❌ Product not found.")
+        return ConversationHandler.END
+
+    title, price, cid = row
+    stock = db.product_stock(pid)
+
+    text = (
+        f"🎁 *{title}*\n\n"
+        f"🆔 ID: `{pid}`\n"
+        f"💵 Price: *{float(price):.3f}* {CURRENCY}\n"
+        f"📦 Stock: *{stock}*"
+    )
+    await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_product_view(pid, cid))
+    return ConversationHandler.END
 
     if data.startswith("buy:"):
         pid = int(data.split(":", 1)[1])
