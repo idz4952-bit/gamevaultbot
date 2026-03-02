@@ -1074,7 +1074,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data[UD_CID] = cid
         await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
 return ConversationHandler.END
-
     if data.startswith("back:prods:"):
         cid = int(data.split(":", 2)[2])
         await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
