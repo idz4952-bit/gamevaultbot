@@ -1,18 +1,8 @@
 # config.py
 import os
 import re
-import secrets
-import logging
 from datetime import datetime, timedelta
-
-# =========================
-# Logging
-# =========================
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
-)
-logger = logging.getLogger("shopbot")
+from typing import Optional
 
 # =========================
 # ENV
@@ -32,8 +22,8 @@ BYBIT_UID = os.getenv("BYBIT_UID", "12345678")
 USDT_TRC20 = os.getenv("USDT_TRC20", "YOUR_USDT_TRC20_ADDRESS")
 USDT_BEP20 = os.getenv("USDT_BEP20", "YOUR_USDT_BEP20_ADDRESS")
 
-# ✅ خلي SUPPORT_PHONE واحد فقط (يوزر أو رقم)
-SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "@your_support")  # direct chat (not group)
+# في كودك كان فيه سطرين لنفس المتغير (تم آخر واحد يطغى)
+SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "@your_support")  # ✅ direct chat (not group)
 SUPPORT_CHANNEL = os.getenv("SUPPORT_CHANNEL", "@yourchannel")
 
 HIDDEN_CATEGORIES = {
@@ -108,12 +98,46 @@ def manual_hours_text() -> str:
 # SORT: صغير -> كبير
 # =========================
 def extract_sort_value(title: str) -> float:
-    t = title.replace(",", ".")
+    t = (title or "").replace(",", ".")
     nums = re.findall(r"\d+(?:\.\d+)?", t)
     if not nums:
         return 1e18
     return float(nums[0])
 
 
-def new_client_ref() -> str:
-    return secrets.token_hex(10)
+# =========================
+# States
+# =========================
+ST_QTY = 10
+ST_TOPUP_DETAILS = 20
+ST_ADMIN_INPUT = 99
+
+ST_MANUAL_EMAIL = 30
+ST_MANUAL_PASS = 31
+ST_FF_PLAYERID = 32
+
+# =========================
+# user_data keys
+# =========================
+UD_PID = "pid"
+UD_CID = "cid"
+UD_QTY_MAX = "qty_max"
+UD_DEP_ID = "dep_id"
+UD_ADMIN_MODE = "admin_mode"
+UD_ORD_RNG = "orders_rng"
+
+UD_MANUAL_SERVICE = "manual_service"
+UD_MANUAL_PLAN = "manual_plan"
+UD_MANUAL_PRICE = "manual_price"
+UD_MANUAL_PLAN_TITLE = "manual_plan_title"
+UD_MANUAL_EMAIL = "manual_email"
+
+UD_FF_CART = "ff_cart"
+UD_FF_TOTAL = "ff_total"
+
+UD_ADMIN_MANUAL_ID = "admin_manual_id"
+UD_ADMIN_CODES_PID = "admin_codes_pid"
+
+UD_ORDER_CLIENT_REF = "order_client_ref"
+UD_LAST_QTY = "last_qty"
+UD_LAST_PID = "last_pid"
