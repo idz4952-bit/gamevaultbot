@@ -1,4 +1,4 @@
-gv# bot.py
+# bot.py
 import os
 import re
 import io
