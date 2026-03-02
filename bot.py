@@ -54,7 +54,7 @@ USDT_TRC20 = os.getenv("USDT_TRC20", "YOUR_USDT_TRC20_ADDRESS")
 USDT_BEP20 = os.getenv("USDT_BEP20", "YOUR_USDT_BEP20_ADDRESS")
 
 SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+213xxxxxxxxx")
-SUPPORT_CHAT = os.getenv("SUPPORT_CHAT", "@your_support")  # ✅ direct chat (not group)
+SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "@your_support")  # ✅ direct chat (not group)
 SUPPORT_CHANNEL = os.getenv("SUPPORT_CHANNEL", "@yourchannel")
 
 HIDDEN_CATEGORIES = {
@@ -705,7 +705,7 @@ def kb_orders_filters(page: int, total_pages: int) -> InlineKeyboardMarkup:
 def kb_support() -> InlineKeyboardMarkup:
     # ✅ Direct chat support (not group)
     rows = [
-        [InlineKeyboardButton("💬 Support Chat", url=to_tme(SUPPORT_CHAT))],
+        [InlineKeyboardButton("💬 Support Phone", url=to_tme(SUPPORT_PHONE))],
         [InlineKeyboardButton("📣 Support Channel", url=to_tme(SUPPORT_CHANNEL))],
     ]
     return InlineKeyboardMarkup(rows)
