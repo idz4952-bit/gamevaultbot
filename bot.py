@@ -1,7 +1,8 @@
-# bot.py
+
 import os
 import re
 import io
+import html
 import sqlite3
 import secrets
 import logging
@@ -53,9 +54,9 @@ BYBIT_UID = os.getenv("BYBIT_UID", "12345678")
 USDT_TRC20 = os.getenv("USDT_TRC20", "YOUR_USDT_TRC20_ADDRESS")
 USDT_BEP20 = os.getenv("USDT_BEP20", "YOUR_USDT_BEP20_ADDRESS")
 
-SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+213xxxxxxxxx")
-SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "@your_support")  # ✅ direct chat (not group)
-SUPPORT_CHANNEL = os.getenv("SUPPORT_CHANNEL", "@yourchannel")
+SUPPORT_PHONE = os.getenv("SUPPORT_PHONE", "+213xxxxxxxxx").strip()
+SUPPORT_CHAT = os.getenv("SUPPORT_CHAT", "@your_support").strip()  # ✅ direct chat (not group)
+SUPPORT_CHANNEL = os.getenv("SUPPORT_CHANNEL", "@yourchannel").strip()
 
 HIDDEN_CATEGORIES = {
     "🎲 YALLA LUDO",
@@ -146,6 +147,7 @@ cur = con.cursor()
 cur.executescript(
     """
 PRAGMA journal_mode=WAL;
+PRAGMA foreign_keys=ON;
 
 CREATE TABLE IF NOT EXISTS users(
   user_id INTEGER PRIMARY KEY,
@@ -562,36 +564,60 @@ async def send_codes_delivery(chat_id: int, context: ContextTypes.DEFAULT_TYPE, 
     codes = [c.strip() for c in codes if c and c.strip()]
     count = len(codes)
 
-    header = f"🎁 *Delivery Successful!*\n✅ Order *#{order_id}* COMPLETED\n📦 Codes: *{count}*\n\n"
+    header_html = (
+        f"🎁 <b>Delivery Successful!</b>\n"
+        f"✅ Order <b>#{order_id}</b> COMPLETED\n"
+        f"📦 Codes: <b>{count}</b>\n\n"
+    )
     if count == 0:
-        await context.bot.send_message(chat_id=chat_id, text=f"✅ Order #{order_id} COMPLETED\n(No codes)")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"✅ Order <b>#{order_id}</b> COMPLETED\n(No codes)",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     if count > MAX_CODES_IN_MESSAGE:
         content = "\n".join(codes)
         bio = io.BytesIO(content.encode("utf-8"))
         bio.name = f"order_{order_id}_codes.txt"
-        await context.bot.send_message(chat_id=chat_id, text=header + "📎 *Your codes are attached in a file:*", parse_mode=ParseMode.MARKDOWN)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=header_html + "📎 <b>Your codes are attached in a file:</b>",
+            parse_mode=ParseMode.HTML,
+        )
         await context.bot.send_document(chat_id=chat_id, document=bio)
         return
 
     body = "\n".join(codes)
-    text = header + f"`{body}`"
-    if len(text) <= TELEGRAM_TEXT_LIMIT:
-        await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)
+    text_html = header_html + f"<pre>{html.escape(body)}</pre>"
+    if len(text_html) <= TELEGRAM_TEXT_LIMIT:
+        await context.bot.send_message(chat_id=chat_id, text=text_html, parse_mode=ParseMode.HTML)
         return
 
-    await context.bot.send_message(chat_id=chat_id, text=header + "🎁 Codes (part 1):", parse_mode=ParseMode.MARKDOWN)
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=header_html + "🎁 <b>Codes (part 1):</b>",
+        parse_mode=ParseMode.HTML,
+    )
     chunk = ""
     for c in codes:
         line = c + "\n"
-        if len(chunk) + len(line) > TELEGRAM_TEXT_LIMIT:
-            await context.bot.send_message(chat_id=chat_id, text=f"`{chunk.rstrip()}`", parse_mode=ParseMode.MARKDOWN)
+        if len(chunk) + len(line) > 3000:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=f"<pre>{html.escape(chunk.rstrip())}</pre>",
+                parse_mode=ParseMode.HTML,
+            )
             chunk = line
         else:
             chunk += line
     if chunk.strip():
-        await context.bot.send_message(chat_id=chat_id, text=f"`{chunk.rstrip()}`", parse_mode=ParseMode.MARKDOWN)
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text=f"<pre>{html.escape(chunk.rstrip())}</pre>",
+            parse_mode=ParseMode.HTML,
+        )
 
 
 # =========================
@@ -703,9 +729,8 @@ def kb_orders_filters(page: int, total_pages: int) -> InlineKeyboardMarkup:
 
 
 def kb_support() -> InlineKeyboardMarkup:
-    # ✅ Direct chat support (not group)
     rows = [
-        [InlineKeyboardButton("💬 Support Phone", url=to_tme(SUPPORT_PHONE))],
+        [InlineKeyboardButton("💬 Support Chat", url=to_tme(SUPPORT_CHAT))],
         [InlineKeyboardButton("📣 Support Channel", url=to_tme(SUPPORT_CHANNEL))],
     ]
     return InlineKeyboardMarkup(rows)
@@ -1089,11 +1114,10 @@ async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
         "☎️ *Support*\n\n"
         f"📞 Phone: `{md(SUPPORT_PHONE)}`\n"
-        f"💬 Chat: {md(SUPPORT_PHONE)}\n"
+        f"💬 Chat: {md(SUPPORT_CHAT)}\n"
         f"📣 Channel: {md(SUPPORT_CHANNEL)}\n\n"
         "اختر 👇"
     )
-    ...
     if update.message:
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_support())
     else:
