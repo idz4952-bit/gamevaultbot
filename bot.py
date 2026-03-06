@@ -62,6 +62,7 @@ HIDDEN_CATEGORIES = {
     "🎲 YALLA LUDO",
     "🕹 ROBLOX (USA)",
     "🟦 STEAM (USA)",
+    "🪂 PUBG MOBILE UC",
 }
 
 if not TOKEN:
@@ -224,7 +225,6 @@ CREATE TABLE IF NOT EXISTS manual_prices(
   price REAL NOT NULL
 );
 
-
 CREATE TABLE IF NOT EXISTS balance_ledger(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL,
@@ -234,8 +234,12 @@ CREATE TABLE IF NOT EXISTS balance_ledger(
   source_type TEXT NOT NULL,
   source_id TEXT,
   note TEXT,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY(user_id) REFERENCES users(user_id)
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS audit_alerts(
+  alert_key TEXT PRIMARY KEY,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 """
 )
@@ -256,12 +260,6 @@ def ensure_schema():
         cur.execute("CREATE INDEX IF NOT EXISTS idx_codes_pid_used ON codes(pid, used)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_deposits_user_status ON deposits(user_id, status)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_manual_user_status ON manual_orders(user_id, status)")
-        con.commit()
-    except Exception:
-        pass
-
-
-    try:
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ledger_user_created ON balance_ledger(user_id, created_at)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_ledger_source ON balance_ledger(source_type, source_id)")
         con.commit()
@@ -553,47 +551,38 @@ def get_balance(uid: int) -> float:
     return float(row[0]) if row else 0.0
 
 
-def _apply_balance_delta(uid: int, delta: float, source_type: str = "SYSTEM", source_id: Optional[str] = None, note: str = "") -> bool:
+def _record_balance_ledger(uid: int, delta: float, balance_before: float, balance_after: float, source_type: str, source_id: Optional[str] = None, note: str = ""):
+    cur.execute(
+        """
+        INSERT INTO balance_ledger(user_id, delta, balance_before, balance_after, source_type, source_id, note)
+        VALUES(?,?,?,?,?,?,?)
+        """,
+        (uid, float(delta), float(balance_before), float(balance_after), source_type[:80], (source_id or "")[:120], note[:1000]),
+    )
+    con.commit()
+
+
+def add_balance(uid: int, amount: float, source_type: str = "ADMIN_CREDIT", source_id: Optional[str] = None, note: str = ""):
     ensure_user_exists(uid)
-    try:
-        cur.execute("BEGIN IMMEDIATE")
-        cur.execute("SELECT balance FROM users WHERE user_id=?", (uid,))
-        row = cur.fetchone()
-        bal_before = float(row[0] or 0.0) if row else 0.0
-        bal_after = bal_before + float(delta)
-        if bal_after < -1e-9:
-            cur.execute("ROLLBACK")
-            return False
-
-        cur.execute("UPDATE users SET balance=? WHERE user_id=?", (bal_after, uid))
-        cur.execute(
-            """
-            INSERT INTO balance_ledger(user_id, delta, balance_before, balance_after, source_type, source_id, note)
-            VALUES(?,?,?,?,?,?,?)
-            """,
-            (uid, float(delta), bal_before, bal_after, source_type[:60], str(source_id)[:120] if source_id is not None else None, note[:1000]),
-        )
-        cur.execute("COMMIT")
-        return True
-    except Exception:
-        try:
-            cur.execute("ROLLBACK")
-        except Exception:
-            pass
-        raise
+    amount = float(amount)
+    bal_before = get_balance(uid)
+    cur.execute("UPDATE users SET balance=balance+? WHERE user_id=?", (amount, uid))
+    con.commit()
+    bal_after = get_balance(uid)
+    _record_balance_ledger(uid, amount, bal_before, bal_after, source_type, source_id, note)
 
 
-def add_balance(uid: int, amount: float, source_type: str = "SYSTEM_ADD", source_id: Optional[str] = None, note: str = ""):
-    if float(amount) < 0:
-        raise ValueError("amount must be positive")
-    _apply_balance_delta(uid, float(amount), source_type=source_type, source_id=source_id, note=note)
-
-
-def charge_balance(uid: int, amount: float, source_type: str = "SYSTEM_CHARGE", source_id: Optional[str] = None, note: str = "") -> bool:
-    if float(amount) < 0:
-        raise ValueError("amount must be positive")
-    return _apply_balance_delta(uid, -float(amount), source_type=source_type, source_id=source_id, note=note)
-
+def charge_balance(uid: int, amount: float, source_type: str = "USER_DEBIT", source_id: Optional[str] = None, note: str = "") -> bool:
+    ensure_user_exists(uid)
+    amount = float(amount)
+    bal_before = get_balance(uid)
+    if bal_before + 1e-9 < amount:
+        return False
+    cur.execute("UPDATE users SET balance=balance-? WHERE user_id=?", (amount, uid))
+    con.commit()
+    bal_after = get_balance(uid)
+    _record_balance_ledger(uid, -amount, bal_before, bal_after, source_type, source_id, note)
+    return True
 
 def must_block_user(update: Update) -> bool:
     uid = update.effective_user.id
@@ -786,7 +775,6 @@ def kb_support() -> InlineKeyboardMarkup:
 
 
 def kb_admin_panel(uid: int) -> InlineKeyboardMarkup:
-    # ✅ Owner sees full panel, helper sees only Manual Orders
     if admin_role(uid) == ROLE_HELPER:
         return InlineKeyboardMarkup(
             [
@@ -801,42 +789,45 @@ def kb_admin_panel(uid: int) -> InlineKeyboardMarkup:
                 InlineKeyboardButton("👥 Customers", callback_data="admin:users:0"),
             ],
             [
-                InlineKeyboardButton("🧮 Daily Audit", callback_data="admin:dailyauditday:today"),
-            ],
-            [
                 InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0"),
-                InlineKeyboardButton("💰 Deposits", callback_data="admin:deps:0"),  # kept placeholder
+                InlineKeyboardButton("🧮 Daily Audit", callback_data="admin:dailyaudit"),
             ],
             [
-                InlineKeyboardButton("📋 Products (PID)", callback_data="admin:listprod"),
-                InlineKeyboardButton("⛔ Toggle Product", callback_data="admin:toggle"),
-            ],
-            [
-                InlineKeyboardButton("🗑 Delete Product", callback_data="admin:delprod"),
-                InlineKeyboardButton("🗑 Delete Category (FULL)", callback_data="admin:delcatfull"),
-            ],
-            [
-                InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat"),
-                InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod"),
-            ],
-            [
-                InlineKeyboardButton("➕ Add Codes (text)", callback_data="admin:addcodes"),
-                InlineKeyboardButton("📄 Add Codes (file)", callback_data="admin:addcodesfile"),
-            ],
-            [
-                InlineKeyboardButton("💲 Set Price", callback_data="admin:setprice"),
+                InlineKeyboardButton("🛍 Products Control", callback_data="admin:products"),
                 InlineKeyboardButton("🛠 Manual Prices", callback_data="admin:manualprices"),
             ],
             [
                 InlineKeyboardButton("➕ Add Balance", callback_data="admin:addbal"),
                 InlineKeyboardButton("➖ Take Balance", callback_data="admin:takebal"),
             ],
-            [
-                InlineKeyboardButton("👑 Admins", callback_data="admin:admins"),
-            ],
+            [InlineKeyboardButton("👑 Admins", callback_data="admin:admins")],
         ]
     )
 
+
+def kb_admin_products_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📋 All Products", callback_data="admin:listprod"),
+                InlineKeyboardButton("💲 Set Price", callback_data="admin:setprice"),
+            ],
+            [
+                InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat"),
+                InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod"),
+            ],
+            [
+                InlineKeyboardButton("➕ Add Codes Text", callback_data="admin:addcodes"),
+                InlineKeyboardButton("📄 Add Codes File", callback_data="admin:addcodesfile"),
+            ],
+            [
+                InlineKeyboardButton("⛔ Toggle Product", callback_data="admin:toggle"),
+                InlineKeyboardButton("🗑 Delete Product", callback_data="admin:delprod"),
+            ],
+            [InlineKeyboardButton("🗑 Delete Category FULL", callback_data="admin:delcatfull")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="admin:panel")],
+        ]
+    )
 
 def kb_admin_manual_view(mid: int, service: str, has_email: bool, has_pass: bool, has_player: bool) -> InlineKeyboardMarkup:
     rows = []
@@ -1430,7 +1421,7 @@ async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     bal_before = get_balance(uid)
 
-    if not charge_balance(uid, price, source_type="MANUAL_SHAHID_CHARGE", note=plan_title):
+    if not charge_balance(uid, price, "MANUAL_SHAHID_CHARGE", None, plan_title):
         bal = get_balance(uid)
         missing = price - bal
         await update.message.reply_text(
@@ -1479,6 +1470,7 @@ async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("Failed to notify admin about Shahid manual order %s: %s", mid, e)
 
+    _notify_audit_alert_if_needed(context, datetime.utcnow().strftime("%Y-%m-%d"))
     for k in [UD_MANUAL_SERVICE, UD_MANUAL_PLAN, UD_MANUAL_PRICE, UD_MANUAL_PLAN_TITLE, UD_MANUAL_EMAIL]:
         context.user_data.pop(k, None)
     return ConversationHandler.END
@@ -1522,7 +1514,7 @@ async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     bal_before = get_balance(uid)
 
-    if not charge_balance(uid, total_price, source_type="MANUAL_FF_CHARGE", note="Free Fire (MENA) cart"):
+    if not charge_balance(uid, total_price, "MANUAL_FF_CHARGE", None, "Free Fire MENA"):
         bal = get_balance(uid)
         missing = total_price - bal
         await update.message.reply_text(
@@ -1578,6 +1570,7 @@ async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.exception("Failed to notify admin about FF manual order %s: %s", mid, e)
 
+    _notify_audit_alert_if_needed(context, datetime.utcnow().strftime("%Y-%m-%d"))
     context.user_data.pop(UD_FF_CART, None)
     context.user_data.pop(UD_FF_TOTAL, None)
     context.user_data.pop("ff_total_diamonds", None)
@@ -1667,135 +1660,6 @@ def _user_report_text(uid: int, limit_each: int = 10) -> str:
         lines.append(f"D#{did} | {status} | {a} | {created_at} | {method} | {t}")
 
     return "\n".join(lines)
-
-
-def _daily_audit_summary(target_date: str) -> str:
-    try:
-        day_start = datetime.strptime(target_date, "%Y-%m-%d")
-    except ValueError:
-        return "❌ Invalid date format. Use YYYY-MM-DD"
-
-    day_end = day_start + timedelta(days=1)
-    day_start_s = day_start.strftime("%Y-%m-%d %H:%M:%S")
-    day_end_s = day_end.strftime("%Y-%m-%d %H:%M:%S")
-
-    cur.execute("SELECT MIN(date(created_at)) FROM balance_ledger")
-    ledger_start = (cur.fetchone() or (None,))[0]
-
-    cur.execute(
-        """
-        SELECT DISTINCT user_id FROM (
-            SELECT user_id FROM balance_ledger WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)
-            UNION
-            SELECT user_id FROM orders WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)
-            UNION
-            SELECT user_id FROM manual_orders WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)
-            UNION
-            SELECT user_id FROM deposits WHERE status='PENDING_REVIEW' AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)
-        )
-        ORDER BY user_id
-        """,
-        (day_start_s, day_end_s, day_start_s, day_end_s, day_start_s, day_end_s, day_start_s, day_end_s),
-    )
-    user_ids = [int(r[0]) for r in cur.fetchall()]
-
-    cur.execute(
-        "SELECT COUNT(*), COALESCE(SUM(delta),0), COALESCE(SUM(CASE WHEN delta>0 THEN delta ELSE 0 END),0), COALESCE(SUM(CASE WHEN delta<0 THEN -delta ELSE 0 END),0) FROM balance_ledger WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)",
-        (day_start_s, day_end_s),
-    )
-    tx_count, net_total, total_in, total_out = cur.fetchone()
-
-    issues = []
-    lines = []
-    lines.append(f"🧮 *Daily Audit* — `{target_date}`")
-    lines.append("")
-    lines.append(f"📝 Ledger txns: *{int(tx_count or 0)}*")
-    lines.append(f"📥 Total IN: *{float(total_in or 0):.3f}{CURRENCY}*")
-    lines.append(f"📤 Total OUT: *{float(total_out or 0):.3f}{CURRENCY}*")
-    lines.append(f"🔁 Net: *{float(net_total or 0):.3f}{CURRENCY}*")
-    if ledger_start:
-        lines.append(f"🗓 Ledger active from: `{ledger_start}`")
-    else:
-        lines.append("🗓 Ledger active from: *today after this update*")
-    lines.append("")
-
-    if not user_ids:
-        lines.append("✅ No customer activity found for this day.")
-        return "\n".join(lines)[:3800]
-
-    lines.append("👥 *Per Customer*")
-    for uid in user_ids:
-        ensure_user_exists(uid)
-        cur.execute("SELECT username, first_name, balance FROM users WHERE user_id=?", (uid,))
-        row = cur.fetchone() or ("", "", 0.0)
-        username, first_name, current_balance = row[0] or "", row[1] or "", float(row[2] or 0.0)
-
-        cur.execute("SELECT COALESCE(SUM(delta),0) FROM balance_ledger WHERE user_id=? AND datetime(created_at) >= datetime(?)", (uid, day_start_s))
-        after_start = float((cur.fetchone() or (0.0,))[0] or 0.0)
-        cur.execute("SELECT COALESCE(SUM(delta),0) FROM balance_ledger WHERE user_id=? AND datetime(created_at) >= datetime(?)", (uid, day_end_s))
-        after_end = float((cur.fetchone() or (0.0,))[0] or 0.0)
-        cur.execute("SELECT COALESCE(SUM(delta),0), COALESCE(SUM(CASE WHEN delta>0 THEN delta ELSE 0 END),0), COALESCE(SUM(CASE WHEN delta<0 THEN -delta ELSE 0 END),0), COUNT(*) FROM balance_ledger WHERE user_id=? AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (uid, day_start_s, day_end_s))
-        day_net, user_in, user_out, user_tx_count = cur.fetchone()
-        day_net = float(day_net or 0.0)
-        user_in = float(user_in or 0.0)
-        user_out = float(user_out or 0.0)
-        user_tx_count = int(user_tx_count or 0)
-
-        opening = current_balance - after_start
-        closing_actual = current_balance - after_end
-        expected_closing = opening + day_net
-        diff = closing_actual - expected_closing
-
-        cur.execute("SELECT COALESCE(SUM(total),0) FROM orders WHERE user_id=? AND status='COMPLETED' AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (uid, day_start_s, day_end_s))
-        orders_total = float((cur.fetchone() or (0.0,))[0] or 0.0)
-        cur.execute("SELECT COALESCE(SUM(price),0) FROM manual_orders WHERE user_id=? AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (uid, day_start_s, day_end_s))
-        manual_total = float((cur.fetchone() or (0.0,))[0] or 0.0)
-        cur.execute("SELECT COALESCE(SUM(delta),0) FROM balance_ledger WHERE user_id=? AND source_type='ORDER_PURCHASE' AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (uid, day_start_s, day_end_s))
-        order_ledger = abs(float((cur.fetchone() or (0.0,))[0] or 0.0))
-        cur.execute("SELECT COALESCE(SUM(delta),0) FROM balance_ledger WHERE user_id=? AND source_type IN ('MANUAL_SHAHID_CHARGE','MANUAL_FF_CHARGE') AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (uid, day_start_s, day_end_s))
-        manual_ledger = abs(float((cur.fetchone() or (0.0,))[0] or 0.0))
-
-        flags = []
-        if abs(diff) > 1e-6:
-            flags.append(f"diff={diff:.3f}{CURRENCY}")
-        if abs(orders_total - order_ledger) > 1e-6:
-            flags.append(f"orders_db_vs_ledger={orders_total - order_ledger:+.3f}{CURRENCY}")
-        if abs(manual_total - manual_ledger) > 1e-6:
-            flags.append(f"manual_db_vs_ledger={manual_total - manual_ledger:+.3f}{CURRENCY}")
-
-        label = first_name or (f"@{username}" if username else f"User {uid}")
-        lines.append(
-            f"• `{uid}` {label[:18]} | open *{opening:.3f}* | in *{user_in:.3f}* | out *{user_out:.3f}* | close *{closing_actual:.3f}* | txns *{user_tx_count}*"
-        )
-        if flags:
-            lines.append("  ⚠️ " + " ; ".join(flags)[:140])
-            issues.append(uid)
-
-    lines.append("")
-    if issues:
-        lines.append(f"⚠️ Suspicious customers found: *{len(issues)}*")
-        lines.append("راجع العملاء التي عندها diff أو mismatch بين قواعد الطلبات والـ ledger.")
-    else:
-        lines.append("✅ No mismatch detected for this day.")
-
-    return "\n".join(lines)[:3800]
-
-
-def kb_daily_audit(target_date: Optional[str] = None) -> InlineKeyboardMarkup:
-    today = datetime.utcnow().strftime("%Y-%m-%d")
-    yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
-    if not target_date:
-        target_date = today
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("📅 Today", callback_data=f"admin:dailyauditday:{today}"),
-                InlineKeyboardButton("🕘 Yesterday", callback_data=f"admin:dailyauditday:{yesterday}"),
-            ],
-            [InlineKeyboardButton("✍️ Custom Date", callback_data="admin:dailyauditcustom")],
-            [InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")],
-        ]
-    )
 
 
 def _dashboard_text() -> str:
@@ -1900,6 +1764,144 @@ def validate_codes_for_pid(pid: int, codes: List[str]) -> Tuple[bool, str]:
     else:
         msg = f"❌ PUBG code must be 18 characters (A-Z a-z 0-9).\nBad sample: {sample}"
     return False, msg
+
+
+# =========================
+# Daily Audit
+# =========================
+def _daily_audit_data(target_date: str):
+    day_start = f"{target_date} 00:00:00"
+    day_end_dt = datetime.strptime(target_date, "%Y-%m-%d") + timedelta(days=1)
+    day_end = day_end_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    user_ids = set()
+    cur.execute(
+        "SELECT DISTINCT user_id FROM balance_ledger WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)",
+        (day_start, day_end),
+    )
+    user_ids.update(int(r[0]) for r in cur.fetchall())
+    cur.execute("SELECT DISTINCT user_id FROM orders WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (day_start, day_end))
+    user_ids.update(int(r[0]) for r in cur.fetchall())
+    cur.execute("SELECT DISTINCT user_id FROM manual_orders WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (day_start, day_end))
+    user_ids.update(int(r[0]) for r in cur.fetchall())
+    cur.execute("SELECT DISTINCT user_id FROM deposits WHERE datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (day_start, day_end))
+    user_ids.update(int(r[0]) for r in cur.fetchall())
+    user_ids = sorted(user_ids)
+    details = []
+    mismatch_count = 0
+    mismatch_lines = []
+
+    for uid in user_ids:
+        cur.execute(
+            "SELECT balance_before FROM balance_ledger WHERE user_id=? AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?) ORDER BY datetime(created_at), id LIMIT 1",
+            (uid, day_start, day_end),
+        )
+        opening = float((cur.fetchone() or (get_balance(uid),))[0] or 0.0)
+        cur.execute(
+            "SELECT balance_after FROM balance_ledger WHERE user_id=? AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?) ORDER BY datetime(created_at) DESC, id DESC LIMIT 1",
+            (uid, day_start, day_end),
+        )
+        actual = float((cur.fetchone() or (opening,))[0] or 0.0)
+        cur.execute(
+            "SELECT COALESCE(SUM(CASE WHEN delta>0 THEN delta ELSE 0 END),0), COALESCE(SUM(CASE WHEN delta<0 THEN -delta ELSE 0 END),0), COALESCE(SUM(delta),0), COUNT(*) FROM balance_ledger WHERE user_id=? AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)",
+            (uid, day_start, day_end),
+        )
+        income, expense, net, tx_count = cur.fetchone()
+        income = float(income or 0.0)
+        expense = float(expense or 0.0)
+        net = float(net or 0.0)
+        tx_count = int(tx_count or 0)
+        expected = opening + net
+        diff = actual - expected
+
+        cur.execute("SELECT COALESCE(SUM(total),0) FROM orders WHERE user_id=? AND status='COMPLETED' AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (uid, day_start, day_end))
+        orders_total = float((cur.fetchone() or (0.0,))[0] or 0.0)
+        cur.execute("SELECT COALESCE(SUM(price),0) FROM manual_orders WHERE user_id=? AND status IN ('PENDING','COMPLETED') AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (uid, day_start, day_end))
+        manual_total = float((cur.fetchone() or (0.0,))[0] or 0.0)
+        cur.execute("SELECT COALESCE(SUM(amount),0) FROM deposits WHERE user_id=? AND status='APPROVED' AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (uid, day_start, day_end))
+        deposit_total = float((cur.fetchone() or (0.0,))[0] or 0.0)
+        cur.execute("SELECT COALESCE(SUM(-delta),0) FROM balance_ledger WHERE user_id=? AND source_type='ORDER_PURCHASE' AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (uid, day_start, day_end))
+        ledger_orders = float((cur.fetchone() or (0.0,))[0] or 0.0)
+        cur.execute("SELECT COALESCE(SUM(-delta),0) FROM balance_ledger WHERE user_id=? AND source_type IN ('MANUAL_SHAHID_CHARGE','MANUAL_FF_CHARGE') AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (uid, day_start, day_end))
+        ledger_manual = float((cur.fetchone() or (0.0,))[0] or 0.0)
+        cur.execute("SELECT COALESCE(SUM(delta),0) FROM balance_ledger WHERE user_id=? AND source_type='DEPOSIT_APPROVED' AND datetime(created_at) >= datetime(?) AND datetime(created_at) < datetime(?)", (uid, day_start, day_end))
+        ledger_deposit = float((cur.fetchone() or (0.0,))[0] or 0.0)
+
+        flags = []
+        if abs(diff) > 1e-6:
+            flags.append(f"balance_diff={diff:+.3f}{CURRENCY}")
+        if abs(orders_total - ledger_orders) > 1e-6:
+            flags.append(f"orders_vs_ledger={orders_total - ledger_orders:+.3f}{CURRENCY}")
+        if abs(manual_total - ledger_manual) > 1e-6:
+            flags.append(f"manual_vs_ledger={manual_total - ledger_manual:+.3f}{CURRENCY}")
+        if abs(deposit_total - ledger_deposit) > 1e-6:
+            flags.append(f"deposits_vs_ledger={deposit_total - ledger_deposit:+.3f}{CURRENCY}")
+        if flags:
+            mismatch_count += 1
+            mismatch_lines.append(f"⚠️ User {uid}: " + " | ".join(flags))
+
+        details.append({
+            "uid": uid, "opening": opening, "income": income, "expense": expense,
+            "expected": expected, "actual": actual, "diff": diff, "tx_count": tx_count, "flags": flags,
+        })
+
+    return {"date": target_date, "details": details, "mismatch_count": mismatch_count, "mismatch_lines": mismatch_lines}
+
+
+def _daily_audit_summary(target_date: str) -> str:
+    data = _daily_audit_data(target_date)
+    lines = [f"🧮 *Daily Audit* — `{target_date}`", ""]
+    if not data["details"]:
+        return "🧮 *Daily Audit*\n\nلا توجد حركات ledger في هذا اليوم حتى الآن."
+    for row in data["details"]:
+        status = "⚠️ MISMATCH" if row["flags"] else "✅ OK"
+        lines.extend([
+            f"👤 `{row['uid']}` | {status}",
+            f"Open: *{row['opening']:.3f}{CURRENCY}* | In: *+{row['income']:.3f}* | Out: *-{row['expense']:.3f}*",
+            f"Expected: *{row['expected']:.3f}{CURRENCY}* | Actual: *{row['actual']:.3f}{CURRENCY}* | Diff: *{row['diff']:+.3f}{CURRENCY}* | Tx: *{row['tx_count']}*",
+        ])
+        if row["flags"]:
+            lines.append("_" + " | ".join(row["flags"]) + "_")
+        lines.append("")
+    lines.append(f"⚠️ Mismatches: *{data['mismatch_count']}*")
+    if data["mismatch_count"] == 0:
+        lines.append("✅ No mismatch detected.")
+    else:
+        lines.append("🚨 يوجد فرق أو خطأ محاسبي، راجع العملاء المشار إليهم.")
+    return "\n".join(lines)[:3800]
+
+
+def _notify_audit_alert_if_needed(context: ContextTypes.DEFAULT_TYPE, target_date: str):
+    data = _daily_audit_data(target_date)
+    if data["mismatch_count"] <= 0:
+        return
+    alert_key = f"AUDIT:{target_date}"
+    cur.execute("SELECT 1 FROM audit_alerts WHERE alert_key=?", (alert_key,))
+    if cur.fetchone():
+        return
+    cur.execute("INSERT OR IGNORE INTO audit_alerts(alert_key) VALUES(?)", (alert_key,))
+    con.commit()
+    lines = [f"🚨 *AUDIT ALERT* — `{target_date}`", f"⚠️ Mismatch users: *{data['mismatch_count']}*", ""] + data["mismatch_lines"][:20]
+    try:
+        import asyncio
+        asyncio.create_task(context.bot.send_message(chat_id=ADMIN_ID, text="\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN))
+    except Exception:
+        pass
+
+
+def kb_daily_audit(target_date: Optional[str] = None) -> InlineKeyboardMarkup:
+    today = datetime.utcnow().strftime("%Y-%m-%d")
+    yesterday = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("📅 Today", callback_data=f"admin:dailyauditday:{today}"),
+                InlineKeyboardButton("🕘 Yesterday", callback_data=f"admin:dailyauditday:{yesterday}"),
+            ],
+            [InlineKeyboardButton("✍️ Custom Date", callback_data="admin:dailyauditcustom")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="admin:panel")],
+        ]
+    )
 
 
 # =========================
@@ -2028,27 +2030,30 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text("❌ Not allowed.")
         return await q.edit_message_text(_dashboard_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_panel(update.effective_user.id))
 
+    if data == "admin:products":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        return await q.edit_message_text("🛍 *Products Control*\nاختر العملية المطلوبة:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_products_panel())
+
     if data == "admin:dailyaudit":
         if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
         target_date = datetime.utcnow().strftime("%Y-%m-%d")
+        _notify_audit_alert_if_needed(context, target_date)
         return await q.edit_message_text(_daily_audit_summary(target_date), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_daily_audit(target_date))
 
     if data.startswith("admin:dailyauditday:"):
         if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
         target_date = data.split(":", 2)[2]
-        if target_date == "today":
-            target_date = datetime.utcnow().strftime("%Y-%m-%d")
-        elif target_date == "yesterday":
-            target_date = (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d")
+        _notify_audit_alert_if_needed(context, target_date)
         return await q.edit_message_text(_daily_audit_summary(target_date), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_daily_audit(target_date))
 
     if data == "admin:dailyauditcustom":
         if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
         context.user_data[UD_ADMIN_MODE] = "dailyaudit_date"
-        await q.edit_message_text("🧮 Send date now in format:\nYYYY-MM-DD\nExample: 2026-03-06")
+        await q.edit_message_text("✍️ Send date in format: YYYY-MM-DD\nExample: 2026-03-06")
         return ST_ADMIN_INPUT
 
     if data == "admin:admins":
@@ -2306,6 +2311,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
+        _notify_audit_alert_if_needed(context, datetime.utcnow().strftime("%Y-%m-%d"))
         return await q.edit_message_text(f"✅ Manual order #{mid} approved.", reply_markup=kb_admin_panel(update.effective_user.id))
 
     # Manual reject menu + reason (same as before)
@@ -2355,7 +2361,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text("❌ This manual order is not pending.")
 
         bal_before = get_balance(uid)
-        add_balance(uid, price, source_type="MANUAL_REFUND", source_id=str(mid), note=reason_text)
+        add_balance(uid, price, "MANUAL_REFUND", str(mid), reason_text)
         bal_after = get_balance(uid)
 
         cur.execute("UPDATE manual_orders SET status='REJECTED', delivered_text=? WHERE id=?", (reason_text, mid))
@@ -2375,6 +2381,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.exception("Failed to notify user %s about manual reject %s: %s", uid, mid, e)
 
+        _notify_audit_alert_if_needed(context, datetime.utcnow().strftime("%Y-%m-%d"))
         return await q.edit_message_text(f"✅ Manual order #{mid} rejected + refunded.", reply_markup=kb_admin_panel(update.effective_user.id))
 
     # Admin generic modes entry (Owner only)
@@ -2411,7 +2418,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             rows = cur.fetchall()
             if not rows:
-                return await q.edit_message_text("No products.")
+                return await q.edit_message_text("No products.", reply_markup=kb_admin_products_panel())
             lines = [
                 f"PID {pid} | {cat} | {title} | {float(price):.3f}{CURRENCY} | {'ON ✅' if act else 'OFF ⛔'}"
                 for pid, cat, title, price, act in rows
@@ -2419,7 +2426,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "\n".join(lines)
             if len(text) > 3800:
                 text = text[:3800] + "\n..."
-            return await q.edit_message_text(text)
+            return await q.edit_message_text(text, reply_markup=kb_admin_products_panel())
 
         prompts = {
             "addcat": 'Send category title:\nExample: 🪂 PUBG MOBILE UC VOUCHERS',
@@ -2523,7 +2530,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid = update.effective_user.id
         bal_before = get_balance(uid)
 
-        if not charge_balance(uid, total, source_type="ORDER_PURCHASE", source_id=client_ref, note=title):
+        if not charge_balance(uid, total, "ORDER_PURCHASE", client_ref, title):
             bal = get_balance(uid)
             missing = total - bal
             return await q.edit_message_text(
@@ -2537,7 +2544,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             picked = cur.fetchall()
             if len(picked) < qty:
                 cur.execute("ROLLBACK")
-                add_balance(uid, total, source_type="ORDER_REFUND", source_id=client_ref, note=title)
+                add_balance(uid, total, "ORDER_REFUND", client_ref, "auto refund")
                 return await q.edit_message_text("❌ Stock error. Refunded. Try again.")
 
             cur.execute(
@@ -2562,7 +2569,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cur.execute("ROLLBACK")
             except Exception:
                 pass
-            add_balance(uid, total, source_type="ORDER_REFUND", source_id=client_ref, note=title)
+            add_balance(uid, total, "ORDER_REFUND", client_ref, "auto refund")
             logger.exception("Purchase transaction failed: %s", e)
             return await q.edit_message_text("❌ Error while processing order. Refunded. Try again.")
 
@@ -2596,6 +2603,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         except Exception as e:
             logger.exception("Failed to notify admin about completed order %s: %s", oid, e)
+        _notify_audit_alert_if_needed(context, datetime.utcnow().strftime("%Y-%m-%d"))
         return
 
     # Orders pagination
@@ -2742,7 +2750,7 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return ConversationHandler.END
 
             bal_before = get_balance(uid)
-            add_balance(uid, price, source_type="MANUAL_REFUND", source_id=str(mid), note=reason_text)
+            add_balance(uid, price, "MANUAL_REFUND", str(mid), reason_text)
             bal_after = get_balance(uid)
 
             cur.execute("UPDATE manual_orders SET status='REJECTED', delivered_text=? WHERE id=?", (reason_text[:3500], mid))
@@ -2768,13 +2776,13 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
 
         if mode == "dailyaudit_date":
-            if admin_role(uid_admin) != ROLE_OWNER:
-                await update.message.reply_text("❌ Not allowed.")
-                return ConversationHandler.END
             day_text = text.strip()
-            if not re.match(r"^\d{4}-\d{2}-\d{2}$", day_text):
-                await update.message.reply_text("❌ Format must be YYYY-MM-DD")
+            try:
+                datetime.strptime(day_text, "%Y-%m-%d")
+            except ValueError:
+                await update.message.reply_text("❌ Format must be YYYY-MM-DD\nExample: 2026-03-06")
                 return ST_ADMIN_INPUT
+            _notify_audit_alert_if_needed(context, day_text)
             await update.message.reply_text(_daily_audit_summary(day_text), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_daily_audit(day_text))
             return ConversationHandler.END
 
@@ -3027,13 +3035,14 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bal_before = get_balance(user_id)
             cur.execute("UPDATE deposits SET status='APPROVED' WHERE id=?", (dep_id,))
             con.commit()
-            add_balance(user_id, float(amount), source_type="DEPOSIT_APPROVE", source_id=str(dep_id), note="Deposit approved")
+            add_balance(user_id, float(amount), "DEPOSIT_APPROVED", str(dep_id), f"approved by {uid_admin}")
             bal_after = get_balance(user_id)
             await update.message.reply_text(f"✅ Deposit #{dep_id} approved. +{money(float(amount))}")
             await context.bot.send_message(
                 user_id,
                 f"✅ Top up approved: +{money(float(amount))}\n\n💳 Balance before: {bal_before:.3f} {CURRENCY}\n✅ Balance after: {bal_after:.3f} {CURRENCY}",
             )
+            _notify_audit_alert_if_needed(context, datetime.utcnow().strftime("%Y-%m-%d"))
             return ConversationHandler.END
 
         if mode == "rejectdep":
@@ -3054,6 +3063,7 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             con.commit()
             await update.message.reply_text(f"✅ Deposit #{dep_id} rejected.")
             await context.bot.send_message(user_id, f"❌ Top up #{dep_id} rejected. Contact support.")
+            _notify_audit_alert_if_needed(context, datetime.utcnow().strftime("%Y-%m-%d"))
             return ConversationHandler.END
 
         if mode == "addbal":
@@ -3063,13 +3073,14 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return ST_ADMIN_INPUT
             user_id, amount = int(m.group(1)), float(m.group(2))
             bal_before = get_balance(user_id)
-            add_balance(user_id, amount, source_type="ADMIN_ADD", source_id=str(uid_admin), note="Admin add balance")
+            add_balance(user_id, amount, "ADMIN_ADD_BALANCE", str(uid_admin), "manual admin add")
             bal_after = get_balance(user_id)
             await update.message.reply_text(f"✅ Added +{money(amount)} to {user_id}")
             await context.bot.send_message(
                 user_id,
                 f"✅ Admin added balance: +{money(amount)}\n\n💳 Balance before: {bal_before:.3f} {CURRENCY}\n✅ Balance after: {bal_after:.3f} {CURRENCY}",
             )
+            _notify_audit_alert_if_needed(context, datetime.utcnow().strftime("%Y-%m-%d"))
             return ConversationHandler.END
 
         if mode == "takebal":
@@ -3079,17 +3090,18 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return ST_ADMIN_INPUT
             user_id, amount = int(m.group(1)), float(m.group(2))
             bal_before = get_balance(user_id)
-            if not charge_balance(user_id, amount, source_type="ADMIN_TAKE", source_id=str(uid_admin), note="Admin take balance"):
+            if not charge_balance(user_id, amount, "ADMIN_TAKE_BALANCE", str(uid_admin), "manual admin take"):
                 bal = get_balance(user_id)
                 await update.message.reply_text(f"❌ User has insufficient balance. User balance: {bal:.3f} {CURRENCY}")
                 return ConversationHandler.END
-            add_balance(ADMIN_ID, amount, source_type="ADMIN_RECEIVE", source_id=str(user_id), note="Received from user take balance")
+            add_balance(ADMIN_ID, amount, "ADMIN_COLLECT", str(user_id), "take balance from user")
             bal_after = get_balance(user_id)
             await update.message.reply_text(f"✅ Took {money(amount)} from {user_id} → added to Admin.")
             await context.bot.send_message(
                 user_id,
                 f"➖ Admin deducted: -{money(amount)}\n\n💳 Balance before: {bal_before:.3f} {CURRENCY}\n✅ Balance after: {bal_after:.3f} {CURRENCY}",
             )
+            _notify_audit_alert_if_needed(context, datetime.utcnow().strftime("%Y-%m-%d"))
             return ConversationHandler.END
 
         await update.message.reply_text("✅ Done.")
