@@ -961,11 +961,11 @@ def kb_support() -> InlineKeyboardMarkup:
 
 
 def kb_admin_panel(uid: int) -> InlineKeyboardMarkup:
-    # ✅ Owner sees full panel, helper sees only Manual Orders
     if admin_role(uid) == ROLE_HELPER:
         return InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0")],
+                [InlineKeyboardButton("🧮 Daily Audit", callback_data="admin:dailyaudit")],
             ]
         )
 
@@ -977,35 +977,21 @@ def kb_admin_panel(uid: int) -> InlineKeyboardMarkup:
             ],
             [
                 InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0"),
-                InlineKeyboardButton("💰 Deposits", callback_data="admin:deps:0"),  # kept placeholder
+                InlineKeyboardButton("💰 Deposits", callback_data="admin:deps:0"),
             ],
             [
-                InlineKeyboardButton("📋 Products (PID)", callback_data="admin:listprod"),
-                InlineKeyboardButton("⛔ Toggle Product", callback_data="admin:toggle"),
+                InlineKeyboardButton("🛍 Products Control", callback_data="admin:products"),
+                InlineKeyboardButton("🛠 Manual Control", callback_data="admin:manualcontrol"),
             ],
             [
-                InlineKeyboardButton("🗑 Delete Product", callback_data="admin:delprod"),
-                InlineKeyboardButton("🗑 Delete Category (FULL)", callback_data="admin:delcatfull"),
-            ],
-            [
-                InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat"),
-                InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod"),
-            ],
-            [
-                InlineKeyboardButton("➕ Add Codes (text)", callback_data="admin:addcodes"),
-                InlineKeyboardButton("📄 Add Codes (file)", callback_data="admin:addcodesfile"),
-            ],
-            [
-                InlineKeyboardButton("💲 Set Price", callback_data="admin:setprice"),
-                InlineKeyboardButton("🛠 Manual Prices", callback_data="admin:manualprices"),
+                InlineKeyboardButton("🧮 Daily Audit", callback_data="admin:dailyaudit"),
+                InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcastall"),
             ],
             [
                 InlineKeyboardButton("➕ Add Balance", callback_data="admin:addbal"),
                 InlineKeyboardButton("➖ Take Balance", callback_data="admin:takebal"),
             ],
-            [
-                InlineKeyboardButton("👑 Admins", callback_data="admin:admins"),
-            ],
+            [InlineKeyboardButton("👑 Admins", callback_data="admin:admins")],
         ]
     )
 
@@ -2302,7 +2288,6 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if status != "PENDING":
             return await q.edit_message_text("❌ This manual order is not pending.")
 
-        # ✅ store approved_by (admin id) but do not show to client
         approver_id = update.effective_user.id
         cur.execute("UPDATE manual_orders SET status='COMPLETED', approved_by=? WHERE id=?", (approver_id, mid))
         con.commit()
@@ -2314,7 +2299,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "✅ *تم شحن بنجاح!*\n"
                     f"🧾 Manual Order: *#{mid}*\n"
                     f"📦 Service: {plan_title}\n"
-                    f"💵 Paid: *{price:.3f} {CURRENCY}*\n\n"
+                    f"💵 Paid: *{price:.3f} {CURRENCY}*\n"
+                    f"👨‍💼 Approved by admin: `{approver_id}`\n\n"
                     "شكراً لك ❤️"
                 ),
                 parse_mode=ParseMode.MARKDOWN,
@@ -2403,13 +2389,72 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         return await q.edit_message_text(f"✅ Manual order #{mid} rejected + refunded.", reply_markup=kb_admin_panel(update.effective_user.id))
 
+    if data == "admin:products":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        return await q.edit_message_text("🛍 *Products Control*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_products_control())
+
+    if data == "admin:manualcontrol":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        return await q.edit_message_text(manual_prices_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_manual_control())
+
+    if data == "admin:manualprices:edit":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "manualprices_edit"
+        await q.edit_message_text(
+            manual_prices_text() + "\n\nSend: `KEY | PRICE`\nExample: `FF_100 | 0.95`",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_manual_control(),
+        )
+        return ST_ADMIN_INPUT
+
+    if data.startswith("admin:manualtoggle:"):
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        key = data.split(":", 2)[2]
+        set_manual_flag(key, not manual_flag_enabled(key))
+        return await q.edit_message_text(manual_prices_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_manual_control())
+
+    if data == "admin:dailyaudit":
+        if not is_admin_any(update.effective_user.id):
+            return await q.edit_message_text("❌ Not allowed.")
+        report = await _daily_audit_report_with_alerts(context, 'today')
+        return await q.edit_message_text(report, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_daily_audit())
+
+    if data.startswith("admin:dailyauditday:"):
+        if not is_admin_any(update.effective_user.id):
+            return await q.edit_message_text("❌ Not allowed.")
+        raw = data.split(":", 2)[2]
+        target = _resolve_audit_date(raw)
+        report = await _daily_audit_report_with_alerts(context, target)
+        return await q.edit_message_text(report, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_daily_audit(target))
+
+    if data == "admin:dailyauditcustom":
+        if not is_admin_any(update.effective_user.id):
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "dailyauditcustom"
+        await q.edit_message_text("Send date as: YYYY-MM-DD\nExample: 2026-03-05")
+        return ST_ADMIN_INPUT
+
+    if data == "admin:broadcastall":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "broadcastall"
+        await q.edit_message_text("📢 Send the message now. It will be sent to all users.\n/cancel to stop")
+        return ST_ADMIN_INPUT
+
     # Admin generic modes entry (Owner only)
     if data.startswith("admin:") and not (
         data.startswith("admin:dailyaudit") or
         data.startswith("admin:user:addbal:") or
         data.startswith("admin:user:takebal:") or
         data.startswith("admin:products") or
+        data.startswith("admin:manualcontrol") or
         data.startswith("admin:manualprices") or
+        data.startswith("admin:manualtoggle") or
+        data.startswith("admin:dailyaudit") or
         data.startswith("admin:broadcastall")
     ):
         if not is_admin_any(update.effective_user.id):
@@ -2821,7 +2866,7 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_daily_audit(text))
             return ConversationHandler.END
 
-        if mode == "setmanualprice":
+        if mode in ("setmanualprice", "manualprices_edit"):
             if admin_role(uid_admin) != ROLE_OWNER:
                 await update.message.reply_text("❌ Not allowed.")
                 return ConversationHandler.END
@@ -2832,12 +2877,39 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             key, price_s = m.group(1), m.group(2)
             price = float(price_s)
             cur.execute(
-                "INSERT INTO manual_prices(pkey, price) VALUES(?,?) "
-                "ON CONFLICT(pkey) DO UPDATE SET price=excluded.price",
+                "INSERT INTO manual_prices(pkey, price) VALUES(?,?) ON CONFLICT(pkey) DO UPDATE SET price=excluded.price",
                 (key, price),
             )
             con.commit()
-            await update.message.reply_text(f"✅ Manual price updated: {key} = {price:.3f}{CURRENCY}")
+            await update.message.reply_text(f"✅ Manual price updated: {key} = {price:.3f}{CURRENCY}", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+
+        if mode == "dailyauditcustom":
+            if not is_admin_any(uid_admin):
+                await update.message.reply_text("❌ Not allowed.")
+                return ConversationHandler.END
+            if not re.match(r"^\d{4}-\d{2}-\d{2}$", text):
+                await update.message.reply_text("❌ Format: YYYY-MM-DD\nExample: 2026-03-05")
+                return ST_ADMIN_INPUT
+            report = await _daily_audit_report_with_alerts(context, text)
+            await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_daily_audit(text))
+            return ConversationHandler.END
+
+        if mode == "broadcastall":
+            if admin_role(uid_admin) != ROLE_OWNER:
+                await update.message.reply_text("❌ Not allowed.")
+                return ConversationHandler.END
+            cur.execute("SELECT user_id FROM users ORDER BY user_id")
+            user_ids = [int(r[0]) for r in cur.fetchall()]
+            sent = 0
+            failed = 0
+            for to_uid in user_ids:
+                try:
+                    await context.bot.send_message(chat_id=to_uid, text=text)
+                    sent += 1
+                except Exception:
+                    failed += 1
+            await update.message.reply_text(f"✅ Broadcast finished.\nSent: {sent}\nFailed: {failed}", reply_markup=REPLY_MENU)
             return ConversationHandler.END
 
         if admin_role(uid_admin) != ROLE_OWNER:
