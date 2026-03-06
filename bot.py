@@ -62,6 +62,7 @@ HIDDEN_CATEGORIES = {
     "🎲 YALLA LUDO",
     "🕹 ROBLOX (USA)",
     "🟦 STEAM (USA)",
+    "🪂 PUBG MOBILE UC",
 }
 
 if not TOKEN:
@@ -873,8 +874,8 @@ def kb_admin_panel(uid: int) -> InlineKeyboardMarkup:
 
 def kb_admin_products_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 List Products", callback_data="admin:listprod"), InlineKeyboardButton("💲 Set Price", callback_data="admin:setprice")],
-        [InlineKeyboardButton("🎯 User Price", callback_data="admin:userprice"), InlineKeyboardButton("📌 User Prices", callback_data="admin:userpricelist")],
+        [InlineKeyboardButton("📋 List Products", callback_data="admin:listprod"), InlineKeyboardButton("💲 Set Product Price", callback_data="admin:setprice")],
+        [InlineKeyboardButton("🎯 User Product Price", callback_data="admin:userprice"), InlineKeyboardButton("📌 User Product Prices", callback_data="admin:userpricelist")],
         [InlineKeyboardButton("⛔ Toggle Product", callback_data="admin:toggle"), InlineKeyboardButton("🗑 Delete Product", callback_data="admin:delprod")],
         [InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat"), InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod")],
         [InlineKeyboardButton("➕ Add Codes (text)", callback_data="admin:addcodes"), InlineKeyboardButton("📄 Add Codes (file)", callback_data="admin:addcodesfile")],
@@ -2036,7 +2037,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "admin:products":
         if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
-        return await q.edit_message_text("🛍 *Products Control*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_products_panel())
+        return await q.edit_message_text("🛍 *Products Control*\n\n• Set Product Price = change price for all users\n• User Product Price = change price for one user only", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_products_panel())
 
     if data == "admin:userprice":
         if admin_role(update.effective_user.id) != ROLE_OWNER:
@@ -2530,7 +2531,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not rows:
                 return await q.edit_message_text("No products.")
             lines = [
-                f"PID {pid} | {cat} | {title} | {float(price):.3f}{CURRENCY} | {'ON ✅' if act else 'OFF ⛔'}"
+                f"PID {pid} | {cat} | {title} | PRICE={float(price):.3f}{CURRENCY} | {'ON ✅' if act else 'OFF ⛔'}"
                 for pid, cat, title, price, act in rows
             ]
             text = "\n".join(lines)
@@ -2543,7 +2544,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "addprod": 'Send product:\nFormat: "Category Title" | "Product Title" | price\nExample:\n"🍎 ITUNES GIFTCARD (USA)" | "10$ iTunes US" | 9.2',
             "addcodes": 'Send codes:\nFormat: pid | code1\\ncode2\\n...\nExample:\n12 | ABCD-1234\nEFGH-5678',
             "addcodesfile": "✅ Send PID first (example: 12), then send .txt file.\nOR send file with caption PID.",
-            "setprice": 'Send: pid | new_price\nExample: 12 | 9.5',
+            "setprice": '💲 Set Product Price (all users)\nSend: pid | new_price\nExample: 12 | 9.5',
             "toggle": 'Send: pid (toggle ON/OFF)\nExample: 12',
             "approvedep": 'Send: deposit_id\nExample: 10',
             "rejectdep": 'Send: deposit_id\nExample: 10',
@@ -2577,11 +2578,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text("❌ Product not found.")
         title, price, cid = row
         stock = product_stock(pid)
+        eff_price = get_effective_product_price(update.effective_user.id, pid, float(price))
 
         text = (
             f"🎁 *{title}*\n\n"
             f"🆔 ID: `{pid}`\n"
-            f"💵 Price: *{float(price):.3f}* {CURRENCY}\n"
+            f"💵 Price: *{float(eff_price):.3f}* {CURRENCY}\n"
             f"📦 Stock: *{stock}*"
         )
         return await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_product_view(pid, cid))
@@ -2635,11 +2637,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not row:
             return await q.edit_message_text("❌ Product not found.")
         title, price = row
+        uid = update.effective_user.id
         base_price = float(price)
         price = get_effective_product_price(uid, pid, base_price)
         total = float(price) * qty
 
-        uid = update.effective_user.id
         bal_before = get_balance(uid)
 
         if not charge_balance(uid, total):
