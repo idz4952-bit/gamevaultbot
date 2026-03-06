@@ -316,6 +316,22 @@ def ensure_schema():
         con.commit()
     except Exception:
         pass
+    try:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_manual_prices(
+              user_id INTEGER NOT NULL,
+              pkey TEXT NOT NULL,
+              price REAL NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY(user_id, pkey)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_manual_prices_pkey ON user_manual_prices(pkey)")
+        con.commit()
+    except Exception:
+        pass
 ensure_schema()
 def seed_owner_admin():
     # Ensure owner exists as OWNER in admins table
@@ -715,6 +731,31 @@ def clear_user_product_price(uid: int, pid: int):
     cur.execute("DELETE FROM user_product_prices WHERE user_id=? AND pid=?", (uid, pid))
     con.commit()
 
+def get_user_manual_price(uid: Optional[int], key: str, default_price: Optional[float] = None) -> float:
+    if uid is not None:
+        cur.execute("SELECT price FROM user_manual_prices WHERE user_id=? AND pkey=?", (uid, key))
+        row = cur.fetchone()
+        if row:
+            return float(row[0])
+    if default_price is not None:
+        return float(default_price)
+    return get_manual_price(key, MANUAL_PRICE_DEFAULTS.get(key, 0.0))
+
+def has_user_manual_price(uid: int, key: str) -> bool:
+    cur.execute("SELECT 1 FROM user_manual_prices WHERE user_id=? AND pkey=?", (uid, key))
+    return cur.fetchone() is not None
+
+def set_user_manual_price(uid: int, key: str, price: float):
+    cur.execute(
+        "INSERT INTO user_manual_prices(user_id, pkey, price) VALUES(?,?,?) ON CONFLICT(user_id, pkey) DO UPDATE SET price=excluded.price",
+        (uid, key, float(price)),
+    )
+    con.commit()
+
+def clear_user_manual_price(uid: int, key: str):
+    cur.execute("DELETE FROM user_manual_prices WHERE user_id=? AND pkey=?", (uid, key))
+    con.commit()
+
 def kb_products(cid: int, viewer_uid: Optional[int] = None) -> InlineKeyboardMarkup:
     cur.execute("SELECT pid,title,price FROM products WHERE cid=? AND active=1", (cid,))
     items = cur.fetchall()
@@ -821,6 +862,7 @@ def kb_manual_prices_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("✍️ Edit Manual Prices", callback_data="admin:manualprices:edit")],
+            [InlineKeyboardButton("🎯 User Manual Price", callback_data="admin:usermanualprice"), InlineKeyboardButton("📌 User Manual Prices", callback_data="admin:usermanualpricelist")],
             [InlineKeyboardButton(f"📺 Shahid {s1}", callback_data="admin:manualtoggle:MANUAL_SHAHID_ENABLED"), InlineKeyboardButton(f"💎 Free Fire {s2}", callback_data="admin:manualtoggle:MANUAL_FF_ENABLED")],
             [InlineKeyboardButton(f"Shahid 3M {s3}", callback_data="admin:manualtoggle:SHAHID_MENA_3M_ENABLED"), InlineKeyboardButton(f"Shahid 12M {s4}", callback_data="admin:manualtoggle:SHAHID_MENA_12M_ENABLED")],
             [InlineKeyboardButton("⬅️ Back", callback_data="admin:panel")],
@@ -952,7 +994,7 @@ def _ff_cart_get(context):
         cart = {}
         context.user_data[UD_FF_CART] = cart
     return cart
-def _ff_calc_totals(cart: Dict[str, int]):
+def _ff_calc_totals(cart: Dict[str, int], uid: Optional[int] = None):
     total_price = 0.0
     total_diamonds = 0
     lines = []
@@ -963,7 +1005,7 @@ def _ff_calc_totals(cart: Dict[str, int]):
         if not pack:
             continue
         _, title, diamonds = pack
-        price = get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0))
+        price = get_user_manual_price(uid, sku, get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0)))
         total_price += float(price) * qty
         total_diamonds += diamonds * qty
         lines.append((title, qty, float(price), diamonds))
@@ -980,9 +1022,9 @@ def kb_manual_services() -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton("⛔ No manual services available", callback_data="noop")])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="goto:cats")])
     return InlineKeyboardMarkup(rows)
-def kb_shahid_plans() -> InlineKeyboardMarkup:
-    p3 = get_manual_price("SHAHID_MENA_3M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_3M"])
-    p12 = get_manual_price("SHAHID_MENA_12M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_12M"])
+def kb_shahid_plans(uid: Optional[int] = None) -> InlineKeyboardMarkup:
+    p3 = get_user_manual_price(uid, "SHAHID_MENA_3M", get_manual_price("SHAHID_MENA_3M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_3M"]))
+    p12 = get_user_manual_price(uid, "SHAHID_MENA_12M", get_manual_price("SHAHID_MENA_12M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_12M"]))
     rows = []
     if manual_flag_enabled("SHAHID_MENA_3M_ENABLED"):
         rows.append([InlineKeyboardButton(f"Shahid [MENA] | 3 Month | {p3:.3f}{CURRENCY}", callback_data="manual:shahid:MENA_3M")])
@@ -993,7 +1035,7 @@ def kb_shahid_plans() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="manual:services")])
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="goto:cats")])
     return InlineKeyboardMarkup(rows)
-def ff_menu_text() -> str:
+def ff_menu_text(uid: Optional[int] = None) -> str:
     return (
         "💎 *Free Fire (MENA)*\n\n"
         "🛒 Add packs to cart ثم Checkout.\n"
@@ -1001,22 +1043,22 @@ def ff_menu_text() -> str:
         "✅ تقدر تمسح السلة أو تكمل الدفع\n\n"
         + manual_hours_text()
     )
-def kb_ff_menu(context) -> InlineKeyboardMarkup:
+def kb_ff_menu(context, uid: Optional[int] = None) -> InlineKeyboardMarkup:
     cart = _ff_cart_get(context)
     rows = []
     for sku, title, _ in FF_PACKS:
         qty = int(cart.get(sku, 0))
         suffix = f"  🧺[{qty}]" if qty > 0 else ""
-        price = get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0))
+        price = get_user_manual_price(uid, sku, get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0)))
         rows.append([InlineKeyboardButton(f"{title} 💎 | {float(price):.3f}{CURRENCY}{suffix}", callback_data=f"manual:ff:add:{sku}")])
     rows.append([InlineKeyboardButton("🗑 Clear Cart", callback_data="manual:ff:clear")])
     rows.append([InlineKeyboardButton("✅ Proceed to Checkout", callback_data="manual:ff:checkout")])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="manual:services")])
     rows.append([InlineKeyboardButton("❌ Cancel", callback_data="goto:cats")])
     return InlineKeyboardMarkup(rows)
-def ff_checkout_text(context) -> str:
+def ff_checkout_text(context, uid: Optional[int] = None) -> str:
     cart = _ff_cart_get(context)
-    total_price, total_diamonds, lines = _ff_calc_totals(cart)
+    total_price, total_diamonds, lines = _ff_calc_totals(cart, uid=uid)
     if not lines:
         return "🛒 Cart is empty.\nAdd items first."
     text_lines = ["🧺 *Your Cart — Free Fire* ⚡\n"]
@@ -1404,7 +1446,7 @@ async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("❌ Player ID is too short.\nExample: 123456789")
     uid = update.effective_user.id
     cart = _ff_cart_get(context)
-    total_price, total_diamonds, lines = _ff_calc_totals(cart)
+    total_price, total_diamonds, lines = _ff_calc_totals(cart, uid=uid)
     if not lines or total_price <= 0:
         await update.message.reply_text("🛒 Cart is empty. Open Manual Order again.", reply_markup=REPLY_MENU)
         return ConversationHandler.END
@@ -1764,7 +1806,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "➡️ Password مؤقت\n\n"
             + manual_hours_text()
         )
-        return await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_shahid_plans())
+        return await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_shahid_plans(update.effective_user.id))
     if data.startswith("manual:shahid:"):
         if not manual_flag_enabled("MANUAL_SHAHID_ENABLED"):
             return await q.edit_message_text("⛔ خدمة Shahid معطلة حالياً.", reply_markup=kb_manual_services())
@@ -1773,14 +1815,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         plan = data.split(":")[2]
         if plan == "MENA_3M":
             if not manual_flag_enabled("SHAHID_MENA_3M_ENABLED"):
-                return await q.edit_message_text("⛔ باقة Shahid 3M معطلة حالياً.", reply_markup=kb_shahid_plans())
+                return await q.edit_message_text("⛔ باقة Shahid 3M معطلة حالياً.", reply_markup=kb_shahid_plans(update.effective_user.id))
             plan_title = "Shahid [MENA] | 3 Month"
-            price = get_manual_price("SHAHID_MENA_3M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_3M"])
+            price = get_user_manual_price(update.effective_user.id, "SHAHID_MENA_3M", get_manual_price("SHAHID_MENA_3M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_3M"]))
         elif plan == "MENA_12M":
             if not manual_flag_enabled("SHAHID_MENA_12M_ENABLED"):
-                return await q.edit_message_text("⛔ باقة Shahid 12M معطلة حالياً.", reply_markup=kb_shahid_plans())
+                return await q.edit_message_text("⛔ باقة Shahid 12M معطلة حالياً.", reply_markup=kb_shahid_plans(update.effective_user.id))
             plan_title = "Shahid [MENA] | 12 Month"
-            price = get_manual_price("SHAHID_MENA_12M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_12M"])
+            price = get_user_manual_price(update.effective_user.id, "SHAHID_MENA_12M", get_manual_price("SHAHID_MENA_12M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_12M"]))
         else:
             return await q.edit_message_text("❌ Unknown plan.")
         uid = update.effective_user.id
@@ -1805,7 +1847,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text("⛔ خدمة Free Fire معطلة حالياً.", reply_markup=kb_manual_services())
         if not manual_open_now() and not is_admin_any(update.effective_user.id):
             return await q.edit_message_text("⛔ الشحن اليدوي مغلق الآن.\n\n" + manual_hours_text(), parse_mode=ParseMode.MARKDOWN)
-        return await q.edit_message_text(ff_menu_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_ff_menu(context))
+        return await q.edit_message_text(ff_menu_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_ff_menu(context, update.effective_user.id))
     if data.startswith("manual:ff:add:"):
         sku = data.split(":")[3]
         if not _ff_pack(sku):
@@ -1813,12 +1855,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cart = _ff_cart_get(context)
         cart[sku] = int(cart.get(sku, 0)) + 1
         context.user_data[UD_FF_CART] = cart
-        return await q.edit_message_text(ff_menu_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_ff_menu(context))
+        return await q.edit_message_text(ff_menu_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_ff_menu(context, update.effective_user.id))
     if data == "manual:ff:clear":
         context.user_data[UD_FF_CART] = {}
         context.user_data.pop(UD_FF_TOTAL, None)
         context.user_data.pop("ff_total_diamonds", None)
-        return await q.edit_message_text(ff_menu_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_ff_menu(context))
+        return await q.edit_message_text(ff_menu_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_ff_menu(context, update.effective_user.id))
     if data == "manual:ff:checkout":
         if not manual_open_now() and not is_admin_any(update.effective_user.id):
             return await q.edit_message_text("⛔ الشحن اليدوي مغلق الآن.\n\n" + manual_hours_text(), parse_mode=ParseMode.MARKDOWN)
@@ -1834,7 +1876,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ Insufficient balance.\n\nYour balance: {bal:.3f} {CURRENCY}\nRequired: {total_price:.3f} {CURRENCY}\nMissing: {missing:.3f} {CURRENCY}\n\nClick below to top up 👇",
                 reply_markup=kb_topup_now(),
             )
-        await q.edit_message_text(ff_checkout_text(context), parse_mode=ParseMode.MARKDOWN)
+        await q.edit_message_text(ff_checkout_text(context, update.effective_user.id), parse_mode=ParseMode.MARKDOWN)
         return ST_FF_PLAYERID
     # =========================
     # Admin panel
@@ -1901,6 +1943,46 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         lines.append("")
         lines.append("Use 🎯 User Price to add/update/delete.")
         return await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_products_panel())
+    if data == "admin:usermanualprice":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "usermanualprice"
+        await q.edit_message_text(
+            "🎯 *User Manual Price*\n\n"
+            "Set special manual price for one customer only.\n\n"
+            "Set/Update:\n"
+            "`user_id | KEY | price`\n"
+            "Example:\n"
+            "`1997968014 | FF_100 | 0.80`\n\n"
+            "Delete custom manual price:\n"
+            "`del | user_id | KEY`\n"
+            "Example:\n"
+            "`del | 1997968014 | FF_100`\n\n"
+            "Allowed keys:\n"
+            "`SHAHID_MENA_3M`, `SHAHID_MENA_12M`, `FF_100`, `FF_210`, `FF_530`, `FF_1080`, `FF_2200`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ST_ADMIN_INPUT
+    if data == "admin:usermanualpricelist":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        cur.execute(
+            """
+            SELECT ump.user_id, ump.pkey, ump.price
+            FROM user_manual_prices ump
+            ORDER BY ump.user_id ASC, ump.pkey ASC
+            LIMIT 200
+            """
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return await q.edit_message_text("📌 No custom manual prices found.", reply_markup=kb_manual_prices_panel())
+        lines = ["📌 *User Manual Prices*", ""]
+        for xuid, pkey, price in rows:
+            lines.append(f"• User `{xuid}` | `{pkey}` | *{float(price):.3f}{CURRENCY}*")
+        lines.append("")
+        lines.append("Use 🎯 User Manual Price to add/update/delete.")
+        return await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN, reply_markup=kb_manual_prices_panel())
     if data == "admin:manualprices":
         if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
@@ -2541,6 +2623,55 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as e:
                 logger.exception("Failed to notify user %s about custom manual reject %s: %s", uid, mid, e)
             context.user_data.pop(UD_ADMIN_MANUAL_ID, None)
+            return ConversationHandler.END
+        if mode == "usermanualprice":
+            if admin_role(uid_admin) != ROLE_OWNER:
+                await update.message.reply_text("❌ Not allowed.")
+                return ConversationHandler.END
+            raw = (update.message.text or "").strip()
+            allowed_keys = {"SHAHID_MENA_3M", "SHAHID_MENA_12M", "FF_100", "FF_210", "FF_530", "FF_1080", "FF_2200"}
+            m_del = re.match(r"^del\s*\|\s*(\d+)\s*\|\s*([A-Z0-9_]+)\s*$", raw, flags=re.IGNORECASE)
+            if m_del:
+                user_id = int(m_del.group(1))
+                key = m_del.group(2).upper()
+                if key not in allowed_keys:
+                    await update.message.reply_text("❌ Unknown key.")
+                    return ST_ADMIN_INPUT
+                if not has_user_manual_price(user_id, key):
+                    await update.message.reply_text("❌ No custom manual price exists for this user/key.")
+                    return ConversationHandler.END
+                clear_user_manual_price(user_id, key)
+                await update.message.reply_text(
+                    f"✅ Custom manual price deleted.\nUser: {user_id}\nKey: {key}",
+                    reply_markup=REPLY_MENU,
+                )
+                return ConversationHandler.END
+            m_set = re.match(r"^(\d+)\s*\|\s*([A-Z0-9_]+)\s*\|\s*([\d.]+)\s*$", raw)
+            if not m_set:
+                await update.message.reply_text(
+                    "❌ Format:\n"
+                    "user_id | KEY | price\n"
+                    "Example:\n"
+                    "1997968014 | FF_100 | 0.80\n\n"
+                    "Delete:\n"
+                    "del | user_id | KEY"
+                )
+                return ST_ADMIN_INPUT
+            user_id = int(m_set.group(1))
+            key = m_set.group(2).upper()
+            if key not in allowed_keys:
+                await update.message.reply_text("❌ Unknown key. Use supported manual keys only.")
+                return ST_ADMIN_INPUT
+            price = float(m_set.group(3))
+            if price < 0:
+                await update.message.reply_text("❌ Price must be >= 0")
+                return ST_ADMIN_INPUT
+            ensure_user_exists(user_id)
+            set_user_manual_price(user_id, key, price)
+            await update.message.reply_text(
+                f"✅ Custom manual price saved.\nUser: {user_id}\nKey: {key}\nPrice: {price:.3f}{CURRENCY}",
+                reply_markup=REPLY_MENU,
+            )
             return ConversationHandler.END
         if mode == "setmanualprice":
             if admin_role(uid_admin) != ROLE_OWNER:
