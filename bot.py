@@ -332,6 +332,53 @@ def ensure_schema():
         con.commit()
     except Exception:
         pass
+    try:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS resellers(
+              user_id INTEGER PRIMARY KEY,
+              active INTEGER NOT NULL DEFAULT 1,
+              profit_balance REAL NOT NULL DEFAULT 0,
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_resellers_active ON resellers(active)")
+        con.commit()
+    except Exception:
+        pass
+    try:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reseller_clients(
+              client_user_id INTEGER PRIMARY KEY,
+              reseller_id INTEGER NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reseller_clients_reseller ON reseller_clients(reseller_id)")
+        con.commit()
+    except Exception:
+        pass
+    try:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS reseller_profit_log(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              reseller_id INTEGER NOT NULL,
+              amount REAL NOT NULL,
+              source_type TEXT NOT NULL,
+              source_id TEXT,
+              note TEXT,
+              created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_reseller_profit_log_reseller_created ON reseller_profit_log(reseller_id, created_at)")
+        con.commit()
+    except Exception:
+        pass
 ensure_schema()
 def seed_owner_admin():
     # Ensure owner exists as OWNER in admins table
@@ -452,7 +499,7 @@ REPLY_MENU = ReplyKeyboardMarkup(
     [
         [KeyboardButton("🛒 Our Products"), KeyboardButton("💰 My Balance")],
         [KeyboardButton("📦 My Orders"), KeyboardButton("⚡ Manual Order")],
-        [KeyboardButton("☎️ Contact Support")],
+        [KeyboardButton("🏪 POS Panel"), KeyboardButton("☎️ Contact Support")],
     ],
     resize_keyboard=True,
     is_persistent=True,
@@ -462,6 +509,7 @@ MENU_BUTTONS = {
     "💰 My Balance",
     "📦 My Orders",
     "⚡ Manual Order",
+    "🏪 POS Panel",
     "☎️ Contact Support",
 }
 ADMIN_TEXT_EXIT = {
@@ -756,7 +804,171 @@ def clear_user_manual_price(uid: int, key: str):
     cur.execute("DELETE FROM user_manual_prices WHERE user_id=? AND pkey=?", (uid, key))
     con.commit()
 
+def is_reseller(uid: int) -> bool:
+    cur.execute("SELECT active FROM resellers WHERE user_id=?", (uid,))
+    row = cur.fetchone()
+    return bool(int(row[0])) if row else False
+
+def add_reseller(uid: int):
+    ensure_user_exists(uid)
+    cur.execute("INSERT INTO resellers(user_id, active, profit_balance) VALUES(?,1,COALESCE((SELECT profit_balance FROM resellers WHERE user_id=?),0)) ON CONFLICT(user_id) DO UPDATE SET active=1", (uid, uid))
+    con.commit()
+
+def remove_reseller(uid: int):
+    cur.execute("DELETE FROM reseller_clients WHERE reseller_id=?", (uid,))
+    cur.execute("DELETE FROM resellers WHERE user_id=?", (uid,))
+    con.commit()
+
+def reseller_profit_balance(uid: int) -> float:
+    cur.execute("SELECT profit_balance FROM resellers WHERE user_id=?", (uid,))
+    row = cur.fetchone()
+    return float(row[0]) if row else 0.0
+
+def add_reseller_profit(uid: int, amount: float, source_type: str, source_id: Optional[str] = None, note: str = ""):
+    if amount <= 0:
+        return
+    add_reseller(uid)
+    cur.execute("UPDATE resellers SET profit_balance=profit_balance+? WHERE user_id=?", (float(amount), uid))
+    cur.execute(
+        "INSERT INTO reseller_profit_log(reseller_id, amount, source_type, source_id, note) VALUES(?,?,?,?,?)",
+        (uid, float(amount), source_type[:80], str(source_id or "")[:80], note[:1000]),
+    )
+    con.commit()
+
+def transfer_reseller_profit_to_balance(uid: int) -> float:
+    amount = reseller_profit_balance(uid)
+    if amount <= 0:
+        return 0.0
+    cur.execute("UPDATE resellers SET profit_balance=0 WHERE user_id=?", (uid,))
+    con.commit()
+    add_balance_logged(uid, amount, "POS_PROFIT_TRANSFER", note="Transfer reseller profit to balance")
+    return float(amount)
+
+def get_client_reseller_id(uid: int) -> Optional[int]:
+    cur.execute("SELECT reseller_id FROM reseller_clients WHERE client_user_id=?", (uid,))
+    row = cur.fetchone()
+    return int(row[0]) if row else None
+
+def reseller_can_manage_client(reseller_id: int, client_uid: int) -> bool:
+    cur.execute("SELECT 1 FROM reseller_clients WHERE reseller_id=? AND client_user_id=?", (reseller_id, client_uid))
+    return cur.fetchone() is not None
+
+def assign_client_to_reseller(reseller_id: int, client_uid: int) -> Tuple[bool, str]:
+    if reseller_id == client_uid:
+        return False, "لا يمكن إضافة نفسك كعميل."
+    if is_admin_any(client_uid):
+        return False, "لا يمكن ربط أدمن كنقطة بيع فرعية."
+    if is_reseller(client_uid):
+        return False, "هذا المستخدم نقطة بيع بالفعل."
+    ensure_user_exists(client_uid)
+    cur.execute("SELECT reseller_id FROM reseller_clients WHERE client_user_id=?", (client_uid,))
+    row = cur.fetchone()
+    if row and int(row[0]) == reseller_id:
+        return False, "العميل مضاف بالفعل لهذه النقطة."
+    if row and int(row[0]) != reseller_id:
+        return False, f"العميل تابع لنقطة بيع أخرى: {int(row[0])}"
+    cur.execute("INSERT OR REPLACE INTO reseller_clients(client_user_id, reseller_id) VALUES(?,?)", (client_uid, reseller_id))
+    con.commit()
+    return True, "تم ربط العميل بنقطة البيع."
+
+def remove_client_from_reseller(reseller_id: int, client_uid: int) -> bool:
+    cur.execute("DELETE FROM reseller_clients WHERE reseller_id=? AND client_user_id=?", (reseller_id, client_uid))
+    ch = cur.rowcount
+    con.commit()
+    return bool(ch)
+
+def effective_topup_allowed(uid: int) -> bool:
+    return get_client_reseller_id(uid) is None
+
+def pos_clients_text(reseller_id: int) -> str:
+    cur.execute(
+        """
+        SELECT u.user_id, u.username, u.first_name, u.balance
+        FROM reseller_clients rc
+        JOIN users u ON u.user_id=rc.client_user_id
+        WHERE rc.reseller_id=?
+        ORDER BY rc.client_user_id DESC
+        LIMIT 100
+        """,
+        (reseller_id,),
+    )
+    rows = cur.fetchall()
+    lines = ["🏪 *POS Clients*", f"POS ID: `{reseller_id}`", ""]
+    if not rows:
+        lines.append("لا يوجد عملاء تابعون لهذه النقطة بعد.")
+    else:
+        for uid, username, first_name, bal in rows:
+            uname = f" @{username}" if username else ""
+            name = f" {first_name}" if first_name else ""
+            lines.append(f"• `{uid}`{uname}{name} | 💰 {float(bal or 0):.3f}{CURRENCY}")
+    return "\n".join(lines)[:3800]
+
+
+def kb_pos_panel(uid: int) -> InlineKeyboardMarkup:
+    profit = reseller_profit_balance(uid)
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("➕ Add Client", callback_data="pos:addclient"), InlineKeyboardButton("➖ Remove Client", callback_data="pos:removeclient")],
+            [InlineKeyboardButton("🎯 Set Client Price", callback_data="pos:setprice"), InlineKeyboardButton("💸 Charge Client", callback_data="pos:charge")],
+            [InlineKeyboardButton("📌 My Clients", callback_data="pos:clients"), InlineKeyboardButton(f"💰 Profit {profit:.3f}{CURRENCY}", callback_data="pos:profit")],
+            [InlineKeyboardButton("🔄 Transfer Profit to Balance", callback_data="pos:profit:transfer")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="goto:cats")],
+        ]
+    )
+
+
+def pos_panel_text(uid: int) -> str:
+    cur.execute("SELECT COUNT(*) FROM reseller_clients WHERE reseller_id=?", (uid,))
+    client_count = int(cur.fetchone()[0] or 0)
+    profit = reseller_profit_balance(uid)
+    return (
+        "🏪 *POS Panel*\n\n"
+        f"🆔 POS ID: `{uid}`\n"
+        f"👥 Clients: *{client_count}*\n"
+        f"💰 Pending Profit: *{profit:.3f}{CURRENCY}*\n\n"
+        "من هنا يمكنك:\n"
+        "• إضافة/حذف عملاء تابعين لك\n"
+        "• تحديد سعر خاص لكل عميل\n"
+        "• شحن رصيد العميل من رصيدك\n"
+        "• تحويل أرباحك المجمعة إلى رصيدك"
+    )
+
+
+def kb_reseller_admin_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("➕ Add POS", callback_data="admin:resellers:add"), InlineKeyboardButton("➖ Remove POS", callback_data="admin:resellers:del")],
+            [InlineKeyboardButton("📌 POS List", callback_data="admin:resellers:list")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="admin:panel")],
+        ]
+    )
+
+
+def reseller_admin_text() -> str:
+    cur.execute(
+        """
+        SELECT r.user_id, r.profit_balance, COUNT(rc.client_user_id)
+        FROM resellers r
+        LEFT JOIN reseller_clients rc ON rc.reseller_id=r.user_id
+        WHERE r.active=1
+        GROUP BY r.user_id, r.profit_balance
+        ORDER BY r.user_id
+        """
+    )
+    rows = cur.fetchall()
+    lines = ["🏪 *POS Control*", ""]
+    if not rows:
+        lines.append("No active POS yet.")
+    else:
+        for uid, profit, cnt in rows:
+            lines.append(f"• `{uid}` | clients={int(cnt or 0)} | profit={float(profit or 0):.3f}{CURRENCY}")
+    lines.append("")
+    lines.append("Use buttons below to add/remove POS.")
+    return "\n".join(lines)[:3800]
+
+
 def kb_products(cid: int, viewer_uid: Optional[int] = None) -> InlineKeyboardMarkup:
+
     cur.execute("SELECT pid,title,price FROM products WHERE cid=? AND active=1", (cid,))
     items = cur.fetchall()
     items.sort(key=lambda r: extract_sort_value(r[1]))
@@ -839,7 +1051,8 @@ def kb_admin_panel(uid: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🧮 Daily Audit", callback_data="admin:dailyauditday:today"), InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0")],
             [InlineKeyboardButton("🛍 Products Control", callback_data="admin:products"), InlineKeyboardButton("🛠 Manual Control", callback_data="admin:manualprices")],
             [InlineKeyboardButton("➕ Add Balance", callback_data="admin:addbal"), InlineKeyboardButton("➖ Take Balance", callback_data="admin:takebal")],
-            [InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcastall"), InlineKeyboardButton("👑 Admins", callback_data="admin:admins")],
+            [InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcastall"), InlineKeyboardButton("🏪 POS Control", callback_data="admin:resellers")],
+            [InlineKeyboardButton("👑 Admins", callback_data="admin:admins")],
         ]
     )
 def kb_admin_products_panel() -> InlineKeyboardMarkup:
@@ -1199,6 +1412,10 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_orders(update, context, rng=context.user_data.get(UD_ORD_RNG) or "all", page=0)
     if t == "☎️ Contact Support":
         return await show_support(update, context)
+    if t == "🏪 POS Panel":
+        if not is_reseller(update.effective_user.id):
+            return await update.message.reply_text("❌ هذه القائمة متاحة لنقاط البيع فقط.", reply_markup=REPLY_MENU)
+        return await update.message.reply_text(pos_panel_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
     if t == "⚡ Manual Order":
         # ✅ enforce hours
         if not manual_open_now() and not is_admin_any(update.effective_user.id):
@@ -1791,6 +2008,67 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await show_categories(update, context)
     if data == "goto:balance" or data == "goto:topup":
         return await show_balance(update, context)
+    if data == "pos:panel":
+        if not is_reseller(update.effective_user.id):
+            return await q.edit_message_text("❌ POS only.")
+        return await q.edit_message_text(pos_panel_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
+    if data == "pos:clients":
+        if not is_reseller(update.effective_user.id):
+            return await q.edit_message_text("❌ POS only.")
+        return await q.edit_message_text(pos_clients_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
+    if data == "pos:profit":
+        if not is_reseller(update.effective_user.id):
+            return await q.edit_message_text("❌ POS only.")
+        amount = reseller_profit_balance(update.effective_user.id)
+        text_profit = (
+            "💰 *POS Profit*\n\n"
+            f"Pending Profit: *{amount:.3f}{CURRENCY}*\n\n"
+            "اضغط الزر لتحويل الربح المتجمع إلى رصيدك."
+        )
+        return await q.edit_message_text(text_profit, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
+    if data == "pos:profit:transfer":
+        if not is_reseller(update.effective_user.id):
+            return await q.edit_message_text("❌ POS only.")
+        amount = transfer_reseller_profit_to_balance(update.effective_user.id)
+        if amount <= 0:
+            await q.answer("No profit yet", show_alert=True)
+            return await q.edit_message_text(pos_panel_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
+        await q.answer("Profit transferred ✅", show_alert=False)
+        return await q.edit_message_text(
+            f"✅ تم تحويل أرباح نقطة البيع إلى الرصيد.\n\nAmount: *{amount:.3f}{CURRENCY}*\nBalance now: *{get_balance(update.effective_user.id):.3f}{CURRENCY}*",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=kb_pos_panel(update.effective_user.id),
+        )
+    if data == "pos:addclient":
+        if not is_reseller(update.effective_user.id):
+            return await q.edit_message_text("❌ POS only.")
+        context.user_data[UD_ADMIN_MODE] = "pos_add_client"
+        await q.edit_message_text("➕ Send client user_id to attach under your POS.\n\n/cancel to stop")
+        return ST_ADMIN_INPUT
+    if data == "pos:removeclient":
+        if not is_reseller(update.effective_user.id):
+            return await q.edit_message_text("❌ POS only.")
+        context.user_data[UD_ADMIN_MODE] = "pos_remove_client"
+        await q.edit_message_text("➖ Send client user_id to remove from your POS.\n\n/cancel to stop")
+        return ST_ADMIN_INPUT
+    if data == "pos:setprice":
+        if not is_reseller(update.effective_user.id):
+            return await q.edit_message_text("❌ POS only.")
+        context.user_data[UD_ADMIN_MODE] = "pos_set_price"
+        await q.edit_message_text(
+            "🎯 *Set Client Price*\n\nFormat:\n`client_user_id | pid | price`\nExample:\n`1997968014 | 12 | 10`\n\nDelete custom price:\n`del | client_user_id | pid`\n\n⚠️ لا يمكن أقل من سعر البوت الأساسي.\n\n/cancel to stop",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ST_ADMIN_INPUT
+    if data == "pos:charge":
+        if not is_reseller(update.effective_user.id):
+            return await q.edit_message_text("❌ POS only.")
+        context.user_data[UD_ADMIN_MODE] = "pos_charge_client"
+        await q.edit_message_text(
+            "💸 *Charge Client from POS Balance*\n\nFormat:\n`client_user_id | amount`\nExample:\n`1997968014 | 50`\n\nسيتم خصم المبلغ من رصيد نقطة البيع وإضافته لرصيد العميل.\n\n/cancel to stop",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ST_ADMIN_INPUT
     # Manual nav
     if data == "manual:back" or data == "manual:services":
         return await q.edit_message_text("⚡ *MANUAL ORDER*\nSelect a service:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_manual_services())
@@ -1908,6 +2186,26 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "📢 *Broadcast to all users*\n\nSend the message now. It will be sent to all users.\n\n/cancel to stop",
             parse_mode=ParseMode.MARKDOWN,
         )
+        return ST_ADMIN_INPUT
+    if data == "admin:resellers":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        return await q.edit_message_text(reseller_admin_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_reseller_admin_panel())
+    if data == "admin:resellers:list":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        return await q.edit_message_text(reseller_admin_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_reseller_admin_panel())
+    if data == "admin:resellers:add":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "reseller_add"
+        await q.edit_message_text("🏪 Send user_id to add as POS.\n\n/cancel to stop")
+        return ST_ADMIN_INPUT
+    if data == "admin:resellers:del":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "reseller_del"
+        await q.edit_message_text("🏪 Send user_id to remove from POS.\n\n/cancel to stop")
         return ST_ADMIN_INPUT
     if data == "admin:products":
         if admin_role(update.effective_user.id) != ROLE_OWNER:
@@ -2466,6 +2764,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN,
         )
         await send_codes_delivery(chat_id=uid, context=context, order_id=oid, codes=codes_list)
+        reseller_id = get_client_reseller_id(uid)
+        margin = (float(price) - float(base_price)) * qty
+        if reseller_id and margin > 1e-9:
+            add_reseller_profit(reseller_id, margin, "POS_ORDER_MARGIN", str(oid), f"client={uid} pid={pid} qty={qty}")
+            try:
+                await context.bot.send_message(
+                    chat_id=reseller_id,
+                    text=(
+                        "💰 *POS Profit Added*\n"
+                        f"Client: `{uid}`\n"
+                        f"Order: *#{oid}*\n"
+                        f"Margin added: *{margin:.3f}{CURRENCY}*\n"
+                        f"Pending profit: *{reseller_profit_balance(reseller_id):.3f}{CURRENCY}*"
+                    ),
+                    parse_mode=ParseMode.MARKDOWN,
+                )
+            except Exception:
+                logger.exception("Failed notifying reseller %s about margin", reseller_id)
         try:
             await context.bot.send_message(
                 chat_id=ADMIN_ID,
@@ -2494,6 +2810,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("pay:"):
         method = data.split(":", 1)[1]
         uid = update.effective_user.id
+        reseller_id = get_client_reseller_id(uid)
+        if reseller_id and not is_admin_any(uid):
+            return await q.edit_message_text(f"⛔ هذا الحساب تابع لنقطة بيع `{reseller_id}`.\nشحن الرصيد يتم من خلال نقطة البيع فقط.", parse_mode=ParseMode.MARKDOWN)
         note = secrets.token_hex(8).upper()
         cur.execute(
             "INSERT INTO deposits(user_id,method,note,status) VALUES(?,?,?,'WAITING_PAYMENT')",
@@ -2540,7 +2859,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid_admin = update.effective_user.id
-    if not is_admin_any(uid_admin):
+    if not is_admin_any(uid_admin) and not is_reseller(uid_admin):
         return ConversationHandler.END
     mode = context.user_data.get(UD_ADMIN_MODE)
     # allow exit + menu
@@ -2557,12 +2876,113 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data.pop(UD_ADMIN_MANUAL_ID, None)
             await update.message.reply_text("✅ Cancelled.", reply_markup=REPLY_MENU)
             return ConversationHandler.END
+    text = (update.message.text or "").strip() if update.message else ""
+    if mode == "pos_add_client":
+        if not is_reseller(uid_admin):
+            await update.message.reply_text("❌ Not allowed.")
+            return ConversationHandler.END
+        if not text.isdigit():
+            await update.message.reply_text("❌ Send client user_id only.")
+            return ST_ADMIN_INPUT
+        ok, msg = assign_client_to_reseller(uid_admin, int(text))
+        await update.message.reply_text(("✅ " if ok else "❌ ") + msg, reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+    if mode == "pos_remove_client":
+        if not is_reseller(uid_admin):
+            await update.message.reply_text("❌ Not allowed.")
+            return ConversationHandler.END
+        if not text.isdigit():
+            await update.message.reply_text("❌ Send client user_id only.")
+            return ST_ADMIN_INPUT
+        ok = remove_client_from_reseller(uid_admin, int(text))
+        await update.message.reply_text(("✅ Client removed." if ok else "❌ Client not found under your POS."), reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+    if mode == "pos_set_price":
+        if not is_reseller(uid_admin):
+            await update.message.reply_text("❌ Not allowed.")
+            return ConversationHandler.END
+        m_del = re.match(r"^del\s*\|\s*(\d+)\s*\|\s*(\d+)$", text, re.I)
+        if m_del:
+            client_uid = int(m_del.group(1)); pid = int(m_del.group(2))
+            if not reseller_can_manage_client(uid_admin, client_uid):
+                await update.message.reply_text("❌ هذا العميل ليس تابعاً لك.")
+                return ConversationHandler.END
+            clear_user_product_price(client_uid, pid)
+            await update.message.reply_text("✅ Client custom product price deleted.", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+        m = re.match(r"^(\d+)\s*\|\s*(\d+)\s*\|\s*([\d.]+)$", text)
+        if not m:
+            await update.message.reply_text("❌ Format: client_user_id | pid | price")
+            return ST_ADMIN_INPUT
+        client_uid, pid, price = int(m.group(1)), int(m.group(2)), float(m.group(3))
+        if not reseller_can_manage_client(uid_admin, client_uid):
+            await update.message.reply_text("❌ هذا العميل ليس تابعاً لك.")
+            return ConversationHandler.END
+        base_price = get_base_product_price(pid)
+        if base_price <= 0:
+            await update.message.reply_text("❌ Product not found.")
+            return ConversationHandler.END
+        if price + 1e-9 < base_price:
+            await update.message.reply_text(f"❌ لا يمكن أقل من سعر البوت الأساسي: {base_price:.3f}{CURRENCY}")
+            return ConversationHandler.END
+        set_user_product_price(client_uid, pid, price)
+        await update.message.reply_text(f"✅ Client custom product price saved.\nBase: {base_price:.3f}{CURRENCY}\nSell: {price:.3f}{CURRENCY}", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+    if mode == "pos_charge_client":
+        if not is_reseller(uid_admin):
+            await update.message.reply_text("❌ Not allowed.")
+            return ConversationHandler.END
+        m = re.match(r"^(\d+)\s*\|\s*([\d.]+)$", text)
+        if not m:
+            await update.message.reply_text("❌ Format: client_user_id | amount")
+            return ST_ADMIN_INPUT
+        client_uid, amount = int(m.group(1)), float(m.group(2))
+        if amount <= 0:
+            await update.message.reply_text("❌ Amount must be positive.")
+            return ST_ADMIN_INPUT
+        if not reseller_can_manage_client(uid_admin, client_uid):
+            await update.message.reply_text("❌ هذا العميل ليس تابعاً لك.")
+            return ConversationHandler.END
+        ok, rb_before, rb_after = charge_balance_logged(uid_admin, amount, "POS_TOPUP_TO_CLIENT", str(client_uid), f"POS topup to client {client_uid}")
+        if not ok:
+            await update.message.reply_text(f"❌ رصيد نقطة البيع غير كافٍ.\nرصيدك: {rb_before:.3f}{CURRENCY}", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+        cb_before, cb_after = add_balance_logged(client_uid, amount, "POS_TOPUP_FROM_RESELLER", str(uid_admin), f"POS {uid_admin} topup")
+        try:
+            await context.bot.send_message(client_uid, f"✅ تم شحن رصيدك من نقطة البيع التابعة لك.\n+{amount:.3f}{CURRENCY}\n\n💳 Before: {cb_before:.3f}{CURRENCY}\n✅ After: {cb_after:.3f}{CURRENCY}")
+        except Exception:
+            logger.exception("Failed notifying client %s about POS topup", client_uid)
+        await update.message.reply_text(f"✅ تم شحن العميل {client_uid} بمبلغ {amount:.3f}{CURRENCY}\nرصيدك الآن: {rb_after:.3f}{CURRENCY}", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+    if mode == "reseller_add":
+        if admin_role(uid_admin) != ROLE_OWNER:
+            await update.message.reply_text("❌ Not allowed.")
+            return ConversationHandler.END
+        if not text.isdigit():
+            await update.message.reply_text("❌ Send user_id only.")
+            return ST_ADMIN_INPUT
+        target = int(text)
+        if is_admin_any(target):
+            await update.message.reply_text("❌ لا يمكن جعل الأدمن نقطة بيع.")
+            return ConversationHandler.END
+        add_reseller(target)
+        await update.message.reply_text(f"✅ Added POS: {target}", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+    if mode == "reseller_del":
+        if admin_role(uid_admin) != ROLE_OWNER:
+            await update.message.reply_text("❌ Not allowed.")
+            return ConversationHandler.END
+        if not text.isdigit():
+            await update.message.reply_text("❌ Send user_id only.")
+            return ST_ADMIN_INPUT
+        remove_reseller(int(text))
+        await update.message.reply_text(f"✅ Removed POS: {int(text)}", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
     # helper limitation
     if admin_role(uid_admin) == ROLE_HELPER:
         if mode not in ("manual_reject_custom",):
             await update.message.reply_text("❌ Not allowed.")
             return ConversationHandler.END
-    text = (update.message.text or "").strip() if update.message else ""
     try:
         if mode == "admins_manage":
             if admin_role(uid_admin) != ROLE_OWNER:
@@ -3079,7 +3499,7 @@ async def rejectdep_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 def build_app():
     app = ApplicationBuilder().token(TOKEN).build()
-    CB_PATTERN = r"^(cat:|view:|buy:|confirm:|pay:|paid:|manual:|admin:|orders:|back:|goto:)"
+    CB_PATTERN = r"^(cat:|view:|buy:|confirm:|pay:|paid:|manual:|admin:|orders:|back:|goto:|pos:)"
     conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(on_callback, pattern=CB_PATTERN)
