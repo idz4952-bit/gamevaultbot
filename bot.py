@@ -2577,6 +2577,62 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sent, failed = await broadcast_to_all_users(context, f"📢 إشعار من الإدارة\n\n{msg}")
             await update.message.reply_text(f"✅ Broadcast finished.\nSent: {sent}\nFailed: {failed}", reply_markup=REPLY_MENU)
             return ConversationHandler.END
+        if mode == "userprice":
+            if admin_role(uid_admin) != ROLE_OWNER:
+                await update.message.reply_text("❌ Not allowed.")
+                return ConversationHandler.END
+            raw = (update.message.text or "").strip()
+            m_del = re.match(r"^del\s*\|\s*(\d+)\s*\|\s*(\d+)\s*$", raw, flags=re.IGNORECASE)
+            if m_del:
+                user_id = int(m_del.group(1))
+                pid = int(m_del.group(2))
+                cur.execute("SELECT title FROM products WHERE pid=?", (pid,))
+                prow = cur.fetchone()
+                if not prow:
+                    await update.message.reply_text("❌ Product PID not found.")
+                    return ST_ADMIN_INPUT
+                if not has_user_product_price(user_id, pid):
+                    await update.message.reply_text("❌ No custom price exists for this user/product.")
+                    return ConversationHandler.END
+                clear_user_product_price(user_id, pid)
+                await update.message.reply_text(
+                    f"✅ Custom price deleted.\nUser: {user_id}\nPID: {pid}\nProduct: {prow[0]}",
+                    reply_markup=REPLY_MENU,
+                )
+                return ConversationHandler.END
+            m_set = re.match(r"^(\d+)\s*\|\s*(\d+)\s*\|\s*([\d.]+)\s*$", raw)
+            if not m_set:
+                await update.message.reply_text(
+                    "❌ Format:\n"
+                    "Set/Update: user_id | pid | price\n"
+                    "Example: 1997968014 | 12 | 8.5\n\n"
+                    "Delete: del | user_id | pid\n"
+                    "Example: del | 1997968014 | 12"
+                )
+                return ST_ADMIN_INPUT
+            user_id = int(m_set.group(1))
+            pid = int(m_set.group(2))
+            price = float(m_set.group(3))
+            if price < 0:
+                await update.message.reply_text("❌ Price must be >= 0")
+                return ST_ADMIN_INPUT
+            cur.execute("SELECT title, price FROM products WHERE pid=?", (pid,))
+            prow = cur.fetchone()
+            if not prow:
+                await update.message.reply_text("❌ Product PID not found.")
+                return ST_ADMIN_INPUT
+            ensure_user_exists(user_id)
+            set_user_product_price(user_id, pid, price)
+            await update.message.reply_text(
+                f"✅ Custom price saved.\n"
+                f"User: {user_id}\n"
+                f"PID: {pid}\n"
+                f"Product: {prow[0]}\n"
+                f"Base price: {float(prow[1]):.3f}{CURRENCY}\n"
+                f"User price: {float(price):.3f}{CURRENCY}",
+                reply_markup=REPLY_MENU,
+            )
+            return ConversationHandler.END
         if admin_role(uid_admin) != ROLE_OWNER:
             await update.message.reply_text("❌ Not allowed.")
             return ConversationHandler.END
