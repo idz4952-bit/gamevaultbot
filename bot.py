@@ -833,8 +833,12 @@ def manual_prices_text() -> str:
     for k, p in rows:
         lines.append(f"• `{k}` = *{float(p):.3f}{CURRENCY}*")
     lines.append("")
+    lines.append("المفاتيح المتاحة للتعديل:")
+    lines.append("`SHAHID_MENA_3M`, `SHAHID_MENA_12M`, `FF_100`, `FF_210`, `FF_530`, `FF_1080`, `FF_2200`")
+    lines.append("")
     lines.append("للتعديل اضغط: ✍️ Edit Manual Prices")
     lines.append("ثم أرسل الصيغة: `KEY | PRICE`")
+    lines.append("مثال: `FF_100 | 0.95`")
     return "\n".join(lines)[:3800]
 def kb_daily_audit(target_date: Optional[str] = None) -> InlineKeyboardMarkup:
     td = target_date or datetime.utcnow().strftime("%Y-%m-%d")
@@ -2114,9 +2118,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         uid, price, status, service, plan_title = int(row[0]), float(row[1]), row[2], row[3], row[4]
         if status != "PENDING":
             return await q.edit_message_text("❌ This manual order is not pending.")
-        # ✅ store approved_by (admin id) but do not show to client
         approver_id = update.effective_user.id
-        cur.execute("UPDATE manual_orders SET status='COMPLETED', approved_by=? WHERE id=?", (approver_id, mid))
+        delivered_note = f"APPROVED_BY:{approver_id}"
+        cur.execute("UPDATE manual_orders SET status='COMPLETED', approved_by=?, delivered_text=? WHERE id=?", (approver_id, delivered_note, mid))
         con.commit()
         try:
             await context.bot.send_message(
@@ -2126,7 +2130,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🧾 Manual Order: *#{mid}*\n"
                     f"📦 Service: {plan_title}\n"
                     f"💵 Paid: *{price:.3f} {CURRENCY}*\n"
-                    f"👨‍💼 Approved by admin: `{approver_id}`\n\n"
+                    f"🆔 Admin Approver ID: `{approver_id}`\n\n"
                     "شكراً لك ❤️"
                 ),
                 parse_mode=ParseMode.MARKDOWN,
@@ -2542,19 +2546,34 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if admin_role(uid_admin) != ROLE_OWNER:
                 await update.message.reply_text("❌ Not allowed.")
                 return ConversationHandler.END
-            m = re.match(r"^([A-Z0-9_]+)\s*\|\s*([\d.]+)$", text)
+            m = re.match(r"^([A-Za-z0-9_]+)\s*\|\s*([\d.]+)$", text)
             if not m:
-                await update.message.reply_text("❌ Format: KEY | PRICE\nExample: FF_100 | 0.95")
+                await update.message.reply_text(
+                    "❌ Format: KEY | PRICE\n"
+                    "Example: FF_100 | 0.95\n\n"
+                    "Allowed keys:\n"
+                    "SHAHID_MENA_3M\nSHAHID_MENA_12M\nFF_100\nFF_210\nFF_530\nFF_1080\nFF_2200"
+                )
                 return ST_ADMIN_INPUT
-            key, price_s = m.group(1), m.group(2)
+            key, price_s = m.group(1).upper(), m.group(2)
+            allowed_keys = {"SHAHID_MENA_3M", "SHAHID_MENA_12M", "FF_100", "FF_210", "FF_530", "FF_1080", "FF_2200"}
+            if key not in allowed_keys:
+                await update.message.reply_text("❌ Unknown manual price key. Use one of the supported keys only.")
+                return ST_ADMIN_INPUT
             price = float(price_s)
+            if price < 0:
+                await update.message.reply_text("❌ Price must be >= 0")
+                return ST_ADMIN_INPUT
             cur.execute(
                 "INSERT INTO manual_prices(pkey, price) VALUES(?,?) "
                 "ON CONFLICT(pkey) DO UPDATE SET price=excluded.price",
                 (key, price),
             )
             con.commit()
-            await update.message.reply_text(f"✅ Manual price updated: {key} = {price:.3f}{CURRENCY}")
+            await update.message.reply_text(
+                f"✅ Manual price updated: {key} = {price:.3f}{CURRENCY}",
+                reply_markup=kb_manual_prices_panel(),
+            )
             return ConversationHandler.END
         if mode == "dailyaudit_date":
             if admin_role(uid_admin) != ROLE_OWNER:
