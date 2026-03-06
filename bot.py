@@ -300,6 +300,22 @@ def ensure_schema():
         con.commit()
     except Exception:
         pass
+    try:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS user_product_prices(
+              user_id INTEGER NOT NULL,
+              pid INTEGER NOT NULL,
+              price REAL NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY(user_id, pid)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_user_product_prices_pid ON user_product_prices(pid)")
+        con.commit()
+    except Exception:
+        pass
 ensure_schema()
 def seed_owner_admin():
     # Ensure owner exists as OWNER in admins table
@@ -670,14 +686,44 @@ def kb_categories(is_admin_user: bool) -> InlineKeyboardMarkup:
 def product_stock(pid: int) -> int:
     cur.execute("SELECT COUNT(*) FROM codes WHERE pid=? AND used=0", (pid,))
     return int(cur.fetchone()[0])
-def kb_products(cid: int) -> InlineKeyboardMarkup:
+def get_base_product_price(pid: int) -> float:
+    cur.execute("SELECT price FROM products WHERE pid=?", (pid,))
+    row = cur.fetchone()
+    return float(row[0]) if row else 0.0
+
+def get_user_product_price(uid: int, pid: int, default_price: Optional[float] = None) -> float:
+    cur.execute("SELECT price FROM user_product_prices WHERE user_id=? AND pid=?", (uid, pid))
+    row = cur.fetchone()
+    if row:
+        return float(row[0])
+    if default_price is not None:
+        return float(default_price)
+    return get_base_product_price(pid)
+
+def has_user_product_price(uid: int, pid: int) -> bool:
+    cur.execute("SELECT 1 FROM user_product_prices WHERE user_id=? AND pid=?", (uid, pid))
+    return cur.fetchone() is not None
+
+def set_user_product_price(uid: int, pid: int, price: float):
+    cur.execute(
+        "INSERT INTO user_product_prices(user_id, pid, price) VALUES(?,?,?) ON CONFLICT(user_id, pid) DO UPDATE SET price=excluded.price",
+        (uid, pid, float(price)),
+    )
+    con.commit()
+
+def clear_user_product_price(uid: int, pid: int):
+    cur.execute("DELETE FROM user_product_prices WHERE user_id=? AND pid=?", (uid, pid))
+    con.commit()
+
+def kb_products(cid: int, viewer_uid: Optional[int] = None) -> InlineKeyboardMarkup:
     cur.execute("SELECT pid,title,price FROM products WHERE cid=? AND active=1", (cid,))
     items = cur.fetchall()
     items.sort(key=lambda r: extract_sort_value(r[1]))
     rows = []
     for pid, title, price in items:
         stock = product_stock(pid)
-        label = f"{title} | {money(float(price))} | 📦{stock}"
+        show_price = get_user_product_price(viewer_uid, pid, float(price)) if viewer_uid else float(price)
+        label = f"{title} | {money(float(show_price))} | 📦{stock}"
         rows.append([InlineKeyboardButton(label[:62], callback_data=f"view:{pid}")])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back:cats")])
     return InlineKeyboardMarkup(rows)
@@ -759,6 +805,7 @@ def kb_admin_products_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("📋 List Products", callback_data="admin:listprod"), InlineKeyboardButton("💲 Set Price", callback_data="admin:setprice")],
+            [InlineKeyboardButton("🎯 User Price", callback_data="admin:userprice"), InlineKeyboardButton("📌 User Prices", callback_data="admin:userpricelist")],
             [InlineKeyboardButton("⛔ Toggle Product", callback_data="admin:toggle"), InlineKeyboardButton("🗑 Delete Product", callback_data="admin:delprod")],
             [InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat"), InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod")],
             [InlineKeyboardButton("➕ Add Codes (text)", callback_data="admin:addcodes"), InlineKeyboardButton("📄 Add Codes (file)", callback_data="admin:addcodesfile")],
@@ -1156,7 +1203,8 @@ async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not row:
         await update.message.reply_text("❌ Product not found.")
         return ConversationHandler.END
-    title, price = row
+    title, base_price = row
+    price = get_user_product_price(update.effective_user.id, pid, float(base_price))
     total = float(price) * qty
     client_ref = secrets.token_hex(10)
     context.user_data[UD_ORDER_CLIENT_REF] = client_ref
@@ -1819,6 +1867,36 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
         return await q.edit_message_text("🛍 *Products Control*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_products_panel())
+    if data == "admin:userprice":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "userprice"
+        await q.edit_message_text(
+            "🎯 *User Custom Price*\n\nSet special price for one customer only.\n\nSet/Update:\n`user_id | pid | price`\nExample:\n`1997968014 | 12 | 8.5`\n\nDelete custom price:\n`del | user_id | pid`\nExample:\n`del | 1997968014 | 12`",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ST_ADMIN_INPUT
+    if data == "admin:userpricelist":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        cur.execute(
+            """
+            SELECT upp.user_id, upp.pid, upp.price, p.title
+            FROM user_product_prices upp
+            LEFT JOIN products p ON p.pid=upp.pid
+            ORDER BY upp.user_id ASC, upp.pid ASC
+            LIMIT 100
+            """
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return await q.edit_message_text("📌 No custom user prices found.", reply_markup=kb_admin_products_panel())
+        lines = ["📌 *User Custom Prices*", ""]
+        for xuid, pid, price, ptitle in rows:
+            lines.append(f"• User `{xuid}` | PID `{pid}` | *{float(price):.3f}{CURRENCY}* | {ptitle or '-'}")
+        lines.append("")
+        lines.append("Use 🎯 User Price to add/update/delete.")
+        return await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_products_panel())
     if data == "admin:manualprices":
         if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
@@ -2183,10 +2261,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("cat:"):
         cid = int(data.split(":", 1)[1])
         context.user_data[UD_CID] = cid
-        return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
+        return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid, update.effective_user.id))
     if data.startswith("back:prods:"):
         cid = int(data.split(":", 2)[2])
-        return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
+        return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid, update.effective_user.id))
     # View
     if data.startswith("view:"):
         pid = int(data.split(":", 1)[1])
@@ -2194,12 +2272,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = cur.fetchone()
         if not row:
             return await q.edit_message_text("❌ Product not found.")
-        title, price, cid = row
+        title, base_price, cid = row
         stock = product_stock(pid)
+        show_price = get_user_product_price(update.effective_user.id, pid, float(base_price))
+        custom_note = "\n🏷 Special customer price applied" if abs(float(show_price) - float(base_price)) > 1e-9 else ""
         text = (
             f"🎁 *{title}*\n\n"
             f"🆔 ID: `{pid}`\n"
-            f"💵 Price: *{float(price):.3f}* {CURRENCY}\n"
+            f"💵 Price: *{float(show_price):.3f}* {CURRENCY}{custom_note}\n"
             f"📦 Stock: *{stock}*"
         )
         return await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_product_view(pid, cid))
@@ -2213,7 +2293,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title, cid = row
         stock = product_stock(pid)
         if stock <= 0:
-            return await q.edit_message_text("❌ Out of stock.", reply_markup=kb_products(cid))
+            return await q.edit_message_text("❌ Out of stock.", reply_markup=kb_products(cid, update.effective_user.id))
         context.user_data[UD_PID] = pid
         context.user_data[UD_CID] = cid
         context.user_data[UD_QTY_MAX] = stock
@@ -2245,9 +2325,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         row = cur.fetchone()
         if not row:
             return await q.edit_message_text("❌ Product not found.")
-        title, price = row
-        total = float(price) * qty
+        title, base_price = row
         uid = update.effective_user.id
+        price = get_user_product_price(uid, pid, float(base_price))
+        total = float(price) * qty
         ok_charge, bal_before, bal_after = charge_balance_logged(uid, total, "ORDER_PURCHASE", note=title)
         if not ok_charge:
             bal = get_balance(uid)
