@@ -62,6 +62,7 @@ HIDDEN_CATEGORIES = {
     "🎲 YALLA LUDO",
     "🕹 ROBLOX (USA)",
     "🟦 STEAM (USA)",
+    "🪂 PUBG MOBILE UC",
 }
 
 if not TOKEN:
@@ -294,6 +295,16 @@ def ensure_schema():
     except Exception:
         pass
 
+    try:
+        cur.execute("CREATE TABLE IF NOT EXISTS user_product_prices(user_id INTEGER NOT NULL, pid INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY(user_id, pid))")
+        cur.execute("CREATE TABLE IF NOT EXISTS user_manual_prices(user_id INTEGER NOT NULL, pkey TEXT NOT NULL, price REAL NOT NULL, PRIMARY KEY(user_id, pkey))")
+        cur.execute("CREATE TABLE IF NOT EXISTS pos_agents(user_id INTEGER PRIMARY KEY, created_by INTEGER, profit_balance REAL NOT NULL DEFAULT 0, created_at TEXT NOT NULL DEFAULT (datetime('now'))) ")
+        cur.execute("CREATE TABLE IF NOT EXISTS pos_customers(customer_id INTEGER PRIMARY KEY, pos_user_id INTEGER NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now'))) ")
+        cur.execute("CREATE TABLE IF NOT EXISTS pos_child_prices(pos_user_id INTEGER NOT NULL, customer_id INTEGER NOT NULL, pid INTEGER NOT NULL, price REAL NOT NULL, PRIMARY KEY(pos_user_id, customer_id, pid))")
+        con.commit()
+    except Exception:
+        pass
+
 
 ensure_schema()
 
@@ -323,6 +334,110 @@ def is_admin_any(uid: int) -> bool:
 def is_manual_admin(uid: int) -> bool:
     # helper can only manage manual orders; owner can do everything
     return admin_role(uid) in (ROLE_OWNER, ROLE_HELPER)
+
+
+def is_pos_agent(uid: int) -> bool:
+    cur.execute("SELECT 1 FROM pos_agents WHERE user_id=?", (uid,))
+    return cur.fetchone() is not None
+
+
+def pos_customer_owner(customer_id: int) -> Optional[int]:
+    cur.execute("SELECT pos_user_id FROM pos_customers WHERE customer_id=?", (customer_id,))
+    row = cur.fetchone()
+    return int(row[0]) if row else None
+
+
+def customer_is_under_pos(customer_id: int) -> bool:
+    return pos_customer_owner(customer_id) is not None
+
+
+def set_pos_agent(user_id: int, created_by: int):
+    ensure_user_exists(user_id)
+    cur.execute("INSERT OR IGNORE INTO pos_agents(user_id, created_by, profit_balance) VALUES(?,?,0)", (user_id, created_by))
+    con.commit()
+
+
+def remove_pos_agent(user_id: int):
+    cur.execute("DELETE FROM pos_child_prices WHERE pos_user_id=?", (user_id,))
+    cur.execute("DELETE FROM pos_customers WHERE pos_user_id=?", (user_id,))
+    cur.execute("DELETE FROM pos_agents WHERE user_id=?", (user_id,))
+    con.commit()
+
+
+def pos_profit_balance(user_id: int) -> float:
+    cur.execute("SELECT profit_balance FROM pos_agents WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    return float(row[0]) if row else 0.0
+
+
+def add_pos_profit(user_id: int, amount: float):
+    if amount <= 0:
+        return
+    cur.execute("UPDATE pos_agents SET profit_balance=profit_balance+? WHERE user_id=?", (float(amount), user_id))
+    con.commit()
+
+
+def cashout_pos_profit(user_id: int) -> float:
+    amt = pos_profit_balance(user_id)
+    if amt <= 0:
+        return 0.0
+    cur.execute("UPDATE pos_agents SET profit_balance=0 WHERE user_id=?", (user_id,))
+    add_balance(user_id, amt)
+    con.commit()
+    return amt
+
+
+def add_pos_customer(pos_user_id: int, customer_id: int):
+    ensure_user_exists(customer_id)
+    cur.execute("INSERT OR REPLACE INTO pos_customers(customer_id, pos_user_id) VALUES(?,?)", (customer_id, pos_user_id))
+    con.commit()
+
+
+def remove_pos_customer(pos_user_id: int, customer_id: int):
+    cur.execute("DELETE FROM pos_child_prices WHERE pos_user_id=? AND customer_id=?", (pos_user_id, customer_id))
+    cur.execute("DELETE FROM pos_customers WHERE customer_id=? AND pos_user_id=?", (customer_id, pos_user_id))
+    con.commit()
+
+
+def set_pos_child_price(pos_user_id: int, customer_id: int, pid: int, price: float):
+    cur.execute(
+        "INSERT INTO pos_child_prices(pos_user_id, customer_id, pid, price) VALUES(?,?,?,?) "
+        "ON CONFLICT(pos_user_id, customer_id, pid) DO UPDATE SET price=excluded.price",
+        (pos_user_id, customer_id, pid, float(price)),
+    )
+    con.commit()
+
+
+def delete_pos_child_price(pos_user_id: int, customer_id: int, pid: int):
+    cur.execute("DELETE FROM pos_child_prices WHERE pos_user_id=? AND customer_id=? AND pid=?", (pos_user_id, customer_id, pid))
+    con.commit()
+
+
+def get_user_product_price(user_id: int, pid: int) -> Optional[float]:
+    cur.execute("SELECT price FROM user_product_prices WHERE user_id=? AND pid=?", (user_id, pid))
+    row = cur.fetchone()
+    if row is not None:
+        return float(row[0])
+    owner = pos_customer_owner(user_id)
+    if owner is not None:
+        cur.execute("SELECT price FROM pos_child_prices WHERE pos_user_id=? AND customer_id=? AND pid=?", (owner, user_id, pid))
+        row = cur.fetchone()
+        if row is not None:
+            return float(row[0])
+    return None
+
+
+def get_effective_product_price(user_id: int, pid: int, default_price: float) -> float:
+    custom = get_user_product_price(user_id, pid)
+    return float(custom if custom is not None else default_price)
+
+
+def get_effective_manual_price(user_id: int, key: str, default_price: float) -> float:
+    cur.execute("SELECT price FROM user_manual_prices WHERE user_id=? AND pkey=?", (user_id, key))
+    row = cur.fetchone()
+    if row:
+        return float(row[0])
+    return get_manual_price(key, default_price)
 
 
 # =========================
@@ -650,7 +765,7 @@ def product_stock(pid: int) -> int:
     return int(cur.fetchone()[0])
 
 
-def kb_products(cid: int) -> InlineKeyboardMarkup:
+def kb_products(cid: int, uid: int = 0) -> InlineKeyboardMarkup:
     cur.execute("SELECT pid,title,price FROM products WHERE cid=? AND active=1", (cid,))
     items = cur.fetchall()
     items.sort(key=lambda r: extract_sort_value(r[1]))
@@ -658,7 +773,8 @@ def kb_products(cid: int) -> InlineKeyboardMarkup:
     rows = []
     for pid, title, price in items:
         stock = product_stock(pid)
-        label = f"{title} | {money(float(price))} | 📦{stock}"
+        eff_price = get_effective_product_price(uid, pid, float(price)) if uid else float(price)
+        label = f"{title} | {money(eff_price)} | 📦{stock}"
         rows.append([InlineKeyboardButton(label[:62], callback_data=f"view:{pid}")])
 
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back:cats")])
@@ -737,53 +853,80 @@ def kb_support() -> InlineKeyboardMarkup:
 
 
 def kb_admin_panel(uid: int) -> InlineKeyboardMarkup:
-    # ✅ Owner sees full panel, helper sees only Manual Orders
     if admin_role(uid) == ROLE_HELPER:
-        return InlineKeyboardMarkup(
-            [
-                [InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0")],
-            ]
-        )
+        rows = [[InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0")]]
+        if is_pos_agent(uid):
+            rows.append([InlineKeyboardButton("🏪 POS Panel", callback_data="admin:pos:self")])
+        return InlineKeyboardMarkup(rows)
 
-    return InlineKeyboardMarkup(
-        [
-            [
-                InlineKeyboardButton("📊 Dashboard", callback_data="admin:dash"),
-                InlineKeyboardButton("👥 Customers", callback_data="admin:users:0"),
-            ],
-            [
-                InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0"),
-                InlineKeyboardButton("💰 Deposits", callback_data="admin:deps:0"),  # kept placeholder
-            ],
-            [
-                InlineKeyboardButton("📋 Products (PID)", callback_data="admin:listprod"),
-                InlineKeyboardButton("⛔ Toggle Product", callback_data="admin:toggle"),
-            ],
-            [
-                InlineKeyboardButton("🗑 Delete Product", callback_data="admin:delprod"),
-                InlineKeyboardButton("🗑 Delete Category (FULL)", callback_data="admin:delcatfull"),
-            ],
-            [
-                InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat"),
-                InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod"),
-            ],
-            [
-                InlineKeyboardButton("➕ Add Codes (text)", callback_data="admin:addcodes"),
-                InlineKeyboardButton("📄 Add Codes (file)", callback_data="admin:addcodesfile"),
-            ],
-            [
-                InlineKeyboardButton("💲 Set Price", callback_data="admin:setprice"),
-                InlineKeyboardButton("🛠 Manual Prices", callback_data="admin:manualprices"),
-            ],
-            [
-                InlineKeyboardButton("➕ Add Balance", callback_data="admin:addbal"),
-                InlineKeyboardButton("➖ Take Balance", callback_data="admin:takebal"),
-            ],
-            [
-                InlineKeyboardButton("👑 Admins", callback_data="admin:admins"),
-            ],
-        ]
-    )
+    rows = [
+        [InlineKeyboardButton("📊 Dashboard", callback_data="admin:dash"), InlineKeyboardButton("👥 Customers", callback_data="admin:users:0")],
+        [InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0"), InlineKeyboardButton("🧮 Daily Audit", callback_data="admin:dailyauditday:today")],
+        [InlineKeyboardButton("🛍 Products Control", callback_data="admin:products"), InlineKeyboardButton("🛠 Manual Control", callback_data="admin:manualprices")],
+        [InlineKeyboardButton("🏪 POS Manager", callback_data="admin:pos:owner"), InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcastall")],
+        [InlineKeyboardButton("➕ Add Balance", callback_data="admin:addbal"), InlineKeyboardButton("➖ Take Balance", callback_data="admin:takebal")],
+        [InlineKeyboardButton("👑 Admins", callback_data="admin:admins")],
+    ]
+    if is_pos_agent(uid):
+        rows.insert(3, [InlineKeyboardButton("🏪 POS Panel", callback_data="admin:pos:self")])
+    return InlineKeyboardMarkup(rows)
+
+
+def kb_admin_products_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📋 List Products", callback_data="admin:listprod"), InlineKeyboardButton("💲 Set Product Price", callback_data="admin:setprice")],
+        [InlineKeyboardButton("🎯 User Product Price", callback_data="admin:userprice"), InlineKeyboardButton("📌 User Product Prices", callback_data="admin:userpricelist")],
+        [InlineKeyboardButton("⛔ Toggle Product", callback_data="admin:toggle"), InlineKeyboardButton("🗑 Delete Product", callback_data="admin:delprod")],
+        [InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat"), InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod")],
+        [InlineKeyboardButton("➕ Add Codes (text)", callback_data="admin:addcodes"), InlineKeyboardButton("📄 Add Codes (file)", callback_data="admin:addcodesfile")],
+        [InlineKeyboardButton("🗑 Delete Category (FULL)", callback_data="admin:delcatfull")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="admin:panel")],
+    ])
+
+
+def kb_manual_prices_panel() -> InlineKeyboardMarkup:
+    s1 = "ON ✅" if manual_flag_enabled("MANUAL_SHAHID_ENABLED") else "OFF ⛔"
+    s2 = "ON ✅" if manual_flag_enabled("MANUAL_FF_ENABLED") else "OFF ⛔"
+    s3 = "ON ✅" if manual_flag_enabled("SHAHID_MENA_3M_ENABLED") else "OFF ⛔"
+    s4 = "ON ✅" if manual_flag_enabled("SHAHID_MENA_12M_ENABLED") else "OFF ⛔"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("✍️ Edit Manual Prices", callback_data="admin:manualprices:edit")],
+        [InlineKeyboardButton("🎯 User Manual Price", callback_data="admin:usermanualprice"), InlineKeyboardButton("📌 User Manual Prices", callback_data="admin:usermanualpricelist")],
+        [InlineKeyboardButton(f"📺 Shahid {s1}", callback_data="admin:manualtoggle:MANUAL_SHAHID_ENABLED"), InlineKeyboardButton(f"💎 Free Fire {s2}", callback_data="admin:manualtoggle:MANUAL_FF_ENABLED")],
+        [InlineKeyboardButton(f"Shahid 3M {s3}", callback_data="admin:manualtoggle:SHAHID_MENA_3M_ENABLED"), InlineKeyboardButton(f"Shahid 12M {s4}", callback_data="admin:manualtoggle:SHAHID_MENA_12M_ENABLED")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="admin:panel")],
+    ])
+
+
+def manual_prices_text() -> str:
+    cur.execute("SELECT pkey, price FROM manual_prices ORDER BY pkey")
+    rows = cur.fetchall()
+    lines = ["🛠 *Manual Control*", "", "الأسعار الحالية:"]
+    for k, p in rows:
+        lines.append(f"• `{k}` = *{float(p):.3f}{CURRENCY}*")
+    lines.append("")
+    lines.append("Edit: `KEY | PRICE`")
+    lines.append("User manual price: `user_id | KEY | PRICE`")
+    return "\n".join(lines)[:3800]
+
+
+def kb_pos_owner_panel() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add POS", callback_data="admin:pos:add"), InlineKeyboardButton("➖ Remove POS", callback_data="admin:pos:remove")],
+        [InlineKeyboardButton("📋 POS List", callback_data="admin:pos:list")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="admin:panel")],
+    ])
+
+
+def kb_pos_self_panel(uid: int) -> InlineKeyboardMarkup:
+    profit = pos_profit_balance(uid)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("➕ Add Customer", callback_data="admin:pos:self:addcust"), InlineKeyboardButton("➖ Remove Customer", callback_data="admin:pos:self:delcust")],
+        [InlineKeyboardButton("🎯 Child Price", callback_data="admin:pos:self:setprice"), InlineKeyboardButton("📌 Child Prices", callback_data="admin:pos:self:pricelist")],
+        [InlineKeyboardButton("💳 Charge Child", callback_data="admin:pos:self:topup"), InlineKeyboardButton(f"💸 Profit Cashout {profit:.3f}{CURRENCY}", callback_data="admin:pos:self:cashout")],
+        [InlineKeyboardButton("👥 My Customers", callback_data="admin:pos:self:listcust")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="admin:panel")],
+    ])
 
 
 def kb_admin_manual_view(mid: int, service: str, has_email: bool, has_pass: bool, has_player: bool) -> InlineKeyboardMarkup:
@@ -922,7 +1065,7 @@ def _ff_calc_totals(cart: Dict[str, int]):
         if not pack:
             continue
         _, title, diamonds = pack
-        price = get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0))
+        price = get_effective_manual_price(uid, sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0))
         total_price += float(price) * qty
         total_diamonds += diamonds * qty
         lines.append((title, qty, float(price), diamonds))
@@ -967,11 +1110,12 @@ def ff_menu_text() -> str:
 
 def kb_ff_menu(context) -> InlineKeyboardMarkup:
     cart = _ff_cart_get(context)
+    uid = context.user_data.get("_manual_uid", 0)
     rows = []
     for sku, title, _ in FF_PACKS:
         qty = int(cart.get(sku, 0))
         suffix = f"  🧺[{qty}]" if qty > 0 else ""
-        price = get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0))
+        price = get_effective_manual_price(uid, sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0))
         rows.append([InlineKeyboardButton(f"{title} 💎 | {float(price):.3f}{CURRENCY}{suffix}", callback_data=f"manual:ff:add:{sku}")])
 
     rows.append([InlineKeyboardButton("🗑 Clear Cart", callback_data="manual:ff:clear")])
@@ -983,6 +1127,7 @@ def kb_ff_menu(context) -> InlineKeyboardMarkup:
 
 def ff_checkout_text(context) -> str:
     cart = _ff_cart_get(context)
+    context._user_id_for_manual = context.user_data.get("_manual_uid", 0)
     total_price, total_diamonds, lines = _ff_calc_totals(cart)
     if not lines:
         return "🛒 Cart is empty.\nAdd items first."
@@ -1029,6 +1174,26 @@ async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
     u = update.effective_user
     uid = u.id
     bal = get_balance(uid)
+    owner_pos = pos_customer_owner(uid)
+    if owner_pos is not None:
+        text = (
+            "💰 *Wallet*\n\n"
+            f"👤 Name: *{(u.first_name or 'User')}*\n"
+            f"🆔 ID: `{uid}`\n"
+            f"💎 Balance: *{bal:.3f}* {CURRENCY}\n\n"
+            f"🏪 This account is under POS: `{owner_pos}`\n"
+            "لشحن الرصيد تواصل مع نقطة البيع التابعة لك."
+        )
+        if update.message:
+            await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_MENU)
+        else:
+            await update.callback_query.edit_message_text(
+                text,
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="goto:cats")]]),
+            )
+        return
+
     text = (
         "💰 *Wallet*\n\n"
         f"👤 Name: *{(u.first_name or 'User')}*\n"
@@ -1040,7 +1205,6 @@ async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_balance_methods())
     else:
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_balance_methods())
-
 
 def _orders_query(uid: int, rng: str) -> List[Tuple]:
     if rng == "all":
@@ -1221,6 +1385,7 @@ async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     title, price = row
+    price = get_effective_product_price(update.effective_user.id, pid, float(price))
     total = float(price) * qty
 
     client_ref = secrets.token_hex(10)
@@ -1766,10 +1931,10 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         plan = data.split(":")[2]
         if plan == "MENA_3M":
             plan_title = "Shahid [MENA] | 3 Month"
-            price = get_manual_price("SHAHID_MENA_3M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_3M"])
+            price = get_effective_manual_price(update.effective_user.id, "SHAHID_MENA_3M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_3M"])
         elif plan == "MENA_12M":
             plan_title = "Shahid [MENA] | 12 Month"
-            price = get_manual_price("SHAHID_MENA_12M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_12M"])
+            price = get_effective_manual_price(update.effective_user.id, "SHAHID_MENA_12M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_12M"])
         else:
             return await q.edit_message_text("❌ Unknown plan.")
 
@@ -1796,6 +1961,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "manual:ff":
         if not manual_open_now() and not is_admin_any(update.effective_user.id):
             return await q.edit_message_text("⛔ الشحن اليدوي مغلق الآن.\n\n" + manual_hours_text(), parse_mode=ParseMode.MARKDOWN)
+        context.user_data["_manual_uid"] = update.effective_user.id
         return await q.edit_message_text(ff_menu_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_ff_menu(context))
 
     if data.startswith("manual:ff:add:"):
@@ -1805,12 +1971,14 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cart = _ff_cart_get(context)
         cart[sku] = int(cart.get(sku, 0)) + 1
         context.user_data[UD_FF_CART] = cart
+        context.user_data["_manual_uid"] = update.effective_user.id
         return await q.edit_message_text(ff_menu_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_ff_menu(context))
 
     if data == "manual:ff:clear":
         context.user_data[UD_FF_CART] = {}
         context.user_data.pop(UD_FF_TOTAL, None)
         context.user_data.pop("ff_total_diamonds", None)
+        context.user_data["_manual_uid"] = update.effective_user.id
         return await q.edit_message_text(ff_menu_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_ff_menu(context))
 
     if data == "manual:ff:checkout":
@@ -1859,21 +2027,170 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN)
         return ST_ADMIN_INPUT
 
-    # Manual prices view
+    if data == "admin:broadcastall":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "broadcast_all"
+        await q.edit_message_text("📢 *Broadcast to all users*\n\nSend the message now.\n\n/cancel to stop", parse_mode=ParseMode.MARKDOWN)
+        return ST_ADMIN_INPUT
+
+    if data == "admin:products":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        return await q.edit_message_text("🛍 *Products Control*\n\n• Set Product Price = change price for all users\n• User Product Price = change price for one user only", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_products_panel())
+
+    if data == "admin:userprice":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "userprice"
+        await q.edit_message_text("🎯 *User Custom Price*\n\nSet/Update:\n`user_id | pid | price`\n\nDelete:\n`del | user_id | pid`", parse_mode=ParseMode.MARKDOWN)
+        return ST_ADMIN_INPUT
+
+    if data == "admin:userpricelist":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        cur.execute("SELECT user_id, pid, price FROM user_product_prices ORDER BY user_id, pid LIMIT 200")
+        rows = cur.fetchall()
+        if not rows:
+            return await q.edit_message_text("📌 No custom user prices found.", reply_markup=kb_admin_products_panel())
+        lines = ["📌 *User Prices*", ""]
+        for u1, pid, price in rows:
+            lines.append(f"• User `{u1}` | PID `{pid}` | *{float(price):.3f}{CURRENCY}*")
+        return await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_products_panel())
+
     if data == "admin:manualprices":
         if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
-        cur.execute("SELECT pkey, price FROM manual_prices ORDER BY pkey")
-        rows = cur.fetchall()
+        return await q.edit_message_text(manual_prices_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_manual_prices_panel())
 
-        lines = ["🛠 *Manual Prices*\nSend: `key | price`\nExample: `FF_100 | 0.95`\n"]
-        for k, p in rows:
-            lines.append(f"• `{k}` = *{float(p):.3f}{CURRENCY}*")
-        lines.append("\nKeys: SHAHID_MENA_3M, SHAHID_MENA_12M, FF_100, FF_210, FF_530, FF_1080, FF_2200")
-
+    if data == "admin:manualprices:edit":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
         context.user_data[UD_ADMIN_MODE] = "setmanualprice"
-        await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN)
+        await q.edit_message_text(manual_prices_text() + "\n\nSend now: `KEY | PRICE`", parse_mode=ParseMode.MARKDOWN)
         return ST_ADMIN_INPUT
+
+    if data == "admin:usermanualprice":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "usermanualprice"
+        await q.edit_message_text("🎯 *User Manual Price*\n\nSet/Update:\n`user_id | KEY | price`\n\nDelete:\n`del | user_id | KEY`", parse_mode=ParseMode.MARKDOWN)
+        return ST_ADMIN_INPUT
+
+    if data == "admin:usermanualpricelist":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        cur.execute("SELECT user_id, pkey, price FROM user_manual_prices ORDER BY user_id, pkey LIMIT 200")
+        rows = cur.fetchall()
+        if not rows:
+            return await q.edit_message_text("📌 No user manual prices found.", reply_markup=kb_manual_prices_panel())
+        lines = ["📌 *User Manual Prices*", ""]
+        for u1, key, price in rows:
+            lines.append(f"• User `{u1}` | `{key}` | *{float(price):.3f}{CURRENCY}*")
+        return await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN, reply_markup=kb_manual_prices_panel())
+
+    if data.startswith("admin:manualtoggle:"):
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        key = data.split(":", 2)[2]
+        set_manual_flag(key, not manual_flag_enabled(key))
+        return await q.edit_message_text(manual_prices_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_manual_prices_panel())
+
+    if data == "admin:pos:owner":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        return await q.edit_message_text("🏪 *POS Manager*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_owner_panel())
+
+    if data == "admin:pos:add":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "pos_add"
+        await q.edit_message_text("Send admin user id to make him POS:\n`user_id`", parse_mode=ParseMode.MARKDOWN)
+        return ST_ADMIN_INPUT
+
+    if data == "admin:pos:remove":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "pos_remove"
+        await q.edit_message_text("Send POS user id to remove:\n`user_id`", parse_mode=ParseMode.MARKDOWN)
+        return ST_ADMIN_INPUT
+
+    if data == "admin:pos:list":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        cur.execute("SELECT user_id, profit_balance FROM pos_agents ORDER BY user_id")
+        rows = cur.fetchall()
+        if not rows:
+            return await q.edit_message_text("No POS found.", reply_markup=kb_pos_owner_panel())
+        lines = ["🏪 *POS List*", ""]
+        for puid, pbal in rows:
+            cur.execute("SELECT COUNT(*) FROM pos_customers WHERE pos_user_id=?", (puid,))
+            cc = int(cur.fetchone()[0])
+            lines.append(f"• POS `{puid}` | customers={cc} | profit={float(pbal):.3f}{CURRENCY}")
+        return await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_owner_panel())
+
+    if data == "admin:pos:self":
+        if not is_pos_agent(update.effective_user.id):
+            return await q.edit_message_text("❌ You are not POS.")
+        return await q.edit_message_text("🏪 *POS Panel*", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_self_panel(update.effective_user.id))
+
+    if data == "admin:pos:self:addcust":
+        if not is_pos_agent(update.effective_user.id):
+            return await q.edit_message_text("❌ You are not POS.")
+        context.user_data[UD_ADMIN_MODE] = "pos_self_addcust"
+        await q.edit_message_text("Send customer id to attach under you:\n`user_id`", parse_mode=ParseMode.MARKDOWN)
+        return ST_ADMIN_INPUT
+
+    if data == "admin:pos:self:delcust":
+        if not is_pos_agent(update.effective_user.id):
+            return await q.edit_message_text("❌ You are not POS.")
+        context.user_data[UD_ADMIN_MODE] = "pos_self_delcust"
+        await q.edit_message_text("Send customer id to remove from your POS:\n`user_id`", parse_mode=ParseMode.MARKDOWN)
+        return ST_ADMIN_INPUT
+
+    if data == "admin:pos:self:setprice":
+        if not is_pos_agent(update.effective_user.id):
+            return await q.edit_message_text("❌ You are not POS.")
+        context.user_data[UD_ADMIN_MODE] = "pos_self_price"
+        await q.edit_message_text("Set child product price:\n`customer_id | pid | price`\nDelete:\n`del | customer_id | pid`", parse_mode=ParseMode.MARKDOWN)
+        return ST_ADMIN_INPUT
+
+    if data == "admin:pos:self:topup":
+        if not is_pos_agent(update.effective_user.id):
+            return await q.edit_message_text("❌ You are not POS.")
+        context.user_data[UD_ADMIN_MODE] = "pos_self_topup"
+        await q.edit_message_text("Charge child from your balance:\n`customer_id | amount`", parse_mode=ParseMode.MARKDOWN)
+        return ST_ADMIN_INPUT
+
+    if data == "admin:pos:self:pricelist":
+        if not is_pos_agent(update.effective_user.id):
+            return await q.edit_message_text("❌ You are not POS.")
+        cur.execute("SELECT customer_id, pid, price FROM pos_child_prices WHERE pos_user_id=? ORDER BY customer_id, pid LIMIT 200", (update.effective_user.id,))
+        rows = cur.fetchall()
+        if not rows:
+            return await q.edit_message_text("No child prices found.", reply_markup=kb_pos_self_panel(update.effective_user.id))
+        lines = ["📌 *Child Prices*", ""]
+        for cuid, pid, price in rows:
+            lines.append(f"• Customer `{cuid}` | PID `{pid}` | *{float(price):.3f}{CURRENCY}*")
+        return await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_self_panel(update.effective_user.id))
+
+    if data == "admin:pos:self:listcust":
+        if not is_pos_agent(update.effective_user.id):
+            return await q.edit_message_text("❌ You are not POS.")
+        cur.execute("SELECT customer_id FROM pos_customers WHERE pos_user_id=? ORDER BY customer_id", (update.effective_user.id,))
+        rows = cur.fetchall()
+        if not rows:
+            return await q.edit_message_text("No customers under you.", reply_markup=kb_pos_self_panel(update.effective_user.id))
+        lines = ["👥 *My Customers*", ""]
+        for (cuid,) in rows:
+            lines.append(f"• `{cuid}`")
+        return await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_self_panel(update.effective_user.id))
+
+    if data == "admin:pos:self:cashout":
+        if not is_pos_agent(update.effective_user.id):
+            return await q.edit_message_text("❌ You are not POS.")
+        amount = cashout_pos_profit(update.effective_user.id)
+        return await q.edit_message_text(f"✅ POS profit cashed out: {amount:.3f}{CURRENCY}", reply_markup=kb_pos_self_panel(update.effective_user.id))
 
     # Customers list
     if data.startswith("admin:users:"):
@@ -2085,6 +2402,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"🧾 Manual Order: *#{mid}*\n"
                     f"📦 Service: {plan_title}\n"
                     f"💵 Paid: *{price:.3f} {CURRENCY}*\n\n"
+                    f"Approved by admin: `{approver_id}`\n\n"
+                    "شكراً لك ❤️"
                     "شكراً لك ❤️"
                 ),
                 parse_mode=ParseMode.MARKDOWN,
@@ -2152,6 +2471,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         bal_before = get_balance(uid)
         add_balance(uid, price)
+        pos_owner = pos_customer_owner(uid)
+        if pos_owner is not None and price > base_price:
+            add_pos_profit(pos_owner, (price - base_price) * qty)
         bal_after = get_balance(uid)
 
         cur.execute("UPDATE manual_orders SET status='REJECTED', delivered_text=? WHERE id=?", (reason_text, mid))
@@ -2209,7 +2531,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not rows:
                 return await q.edit_message_text("No products.")
             lines = [
-                f"PID {pid} | {cat} | {title} | {float(price):.3f}{CURRENCY} | {'ON ✅' if act else 'OFF ⛔'}"
+                f"PID {pid} | {cat} | {title} | PRICE={float(price):.3f}{CURRENCY} | {'ON ✅' if act else 'OFF ⛔'}"
                 for pid, cat, title, price, act in rows
             ]
             text = "\n".join(lines)
@@ -2222,7 +2544,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "addprod": 'Send product:\nFormat: "Category Title" | "Product Title" | price\nExample:\n"🍎 ITUNES GIFTCARD (USA)" | "10$ iTunes US" | 9.2',
             "addcodes": 'Send codes:\nFormat: pid | code1\\ncode2\\n...\nExample:\n12 | ABCD-1234\nEFGH-5678',
             "addcodesfile": "✅ Send PID first (example: 12), then send .txt file.\nOR send file with caption PID.",
-            "setprice": 'Send: pid | new_price\nExample: 12 | 9.5',
+            "setprice": '💲 Set Product Price (all users)\nSend: pid | new_price\nExample: 12 | 9.5',
             "toggle": 'Send: pid (toggle ON/OFF)\nExample: 12',
             "approvedep": 'Send: deposit_id\nExample: 10',
             "rejectdep": 'Send: deposit_id\nExample: 10',
@@ -2241,11 +2563,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith("cat:"):
         cid = int(data.split(":", 1)[1])
         context.user_data[UD_CID] = cid
-        return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
+        return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid, update.effective_user.id))
 
     if data.startswith("back:prods:"):
         cid = int(data.split(":", 2)[2])
-        return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid))
+        return await q.edit_message_text("🛒 Choose a product:", reply_markup=kb_products(cid, update.effective_user.id))
 
     # View
     if data.startswith("view:"):
@@ -2256,11 +2578,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text("❌ Product not found.")
         title, price, cid = row
         stock = product_stock(pid)
+        eff_price = get_effective_product_price(update.effective_user.id, pid, float(price))
 
         text = (
             f"🎁 *{title}*\n\n"
             f"🆔 ID: `{pid}`\n"
-            f"💵 Price: *{float(price):.3f}* {CURRENCY}\n"
+            f"💵 Price: *{float(eff_price):.3f}* {CURRENCY}\n"
             f"📦 Stock: *{stock}*"
         )
         return await q.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_product_view(pid, cid))
@@ -2275,7 +2598,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         title, cid = row
         stock = product_stock(pid)
         if stock <= 0:
-            return await q.edit_message_text("❌ Out of stock.", reply_markup=kb_products(cid))
+            return await q.edit_message_text("❌ Out of stock.", reply_markup=kb_products(cid, update.effective_user.id))
 
         context.user_data[UD_PID] = pid
         context.user_data[UD_CID] = cid
@@ -2314,9 +2637,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not row:
             return await q.edit_message_text("❌ Product not found.")
         title, price = row
+        uid = update.effective_user.id
+        base_price = float(price)
+        price = get_effective_product_price(uid, pid, base_price)
         total = float(price) * qty
 
-        uid = update.effective_user.id
         bal_before = get_balance(uid)
 
         if not charge_balance(uid, total):
@@ -2482,7 +2807,7 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ConversationHandler.END
 
     # helper limitation
-    if admin_role(uid_admin) == ROLE_HELPER:
+    if admin_role(uid_admin) == ROLE_HELPER and not is_pos_agent(uid_admin):
         if mode not in ("manual_reject_custom",):
             await update.message.reply_text("❌ Not allowed.")
             return ConversationHandler.END
@@ -2562,11 +2887,137 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
             context.user_data.pop(UD_ADMIN_MANUAL_ID, None)
             return ConversationHandler.END
-
-        if mode == "setmanualprice":
-            if admin_role(uid_admin) != ROLE_OWNER:
-                await update.message.reply_text("❌ Not allowed.")
+        if mode == "userprice":
+            m = re.match(r"^(del)\s*\|\s*(\d+)\s*\|\s*(\d+)$", text, flags=re.I)
+            if m:
+                user_id, pid = int(m.group(2)), int(m.group(3))
+                cur.execute("DELETE FROM user_product_prices WHERE user_id=? AND pid=?", (user_id, pid))
+                con.commit()
+                await update.message.reply_text(f"✅ Deleted custom price for user {user_id} pid {pid}")
                 return ConversationHandler.END
+            m = re.match(r"^(\d+)\s*\|\s*(\d+)\s*\|\s*([\d.]+)$", text)
+            if not m:
+                await update.message.reply_text("❌ Format: user_id | pid | price\nOr: del | user_id | pid")
+                return ST_ADMIN_INPUT
+            user_id, pid, price = int(m.group(1)), int(m.group(2)), float(m.group(3))
+            cur.execute(
+                "INSERT INTO user_product_prices(user_id, pid, price) VALUES(?,?,?) ON CONFLICT(user_id, pid) DO UPDATE SET price=excluded.price",
+                (user_id, pid, price),
+            )
+            con.commit()
+            await update.message.reply_text(f"✅ Custom price saved for user {user_id} pid {pid} = {price:.3f}{CURRENCY}")
+            return ConversationHandler.END
+
+        if mode == "usermanualprice":
+            m = re.match(r"^(del)\s*\|\s*(\d+)\s*\|\s*([A-Z0-9_]+)$", text, flags=re.I)
+            if m:
+                user_id, key = int(m.group(2)), m.group(3)
+                cur.execute("DELETE FROM user_manual_prices WHERE user_id=? AND pkey=?", (user_id, key))
+                con.commit()
+                await update.message.reply_text(f"✅ Deleted user manual price for {user_id} {key}")
+                return ConversationHandler.END
+            m = re.match(r"^(\d+)\s*\|\s*([A-Z0-9_]+)\s*\|\s*([\d.]+)$", text)
+            if not m:
+                await update.message.reply_text("❌ Format: user_id | KEY | PRICE\nOr: del | user_id | KEY")
+                return ST_ADMIN_INPUT
+            user_id, key, price = int(m.group(1)), m.group(2), float(m.group(3))
+            cur.execute(
+                "INSERT INTO user_manual_prices(user_id, pkey, price) VALUES(?,?,?) ON CONFLICT(user_id, pkey) DO UPDATE SET price=excluded.price",
+                (user_id, key, price),
+            )
+            con.commit()
+            await update.message.reply_text(f"✅ User manual price saved: {user_id} | {key} = {price:.3f}{CURRENCY}")
+            return ConversationHandler.END
+
+        if mode == "broadcast_all":
+            sent = 0
+            failed = 0
+            cur.execute("SELECT user_id FROM users ORDER BY user_id")
+            for (to_uid,) in cur.fetchall():
+                try:
+                    await context.bot.send_message(chat_id=int(to_uid), text=text)
+                    sent += 1
+                except Exception:
+                    failed += 1
+            await update.message.reply_text(f"✅ Broadcast finished.\nSent: {sent}\nFailed: {failed}", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+
+        if mode == "pos_add":
+            if not text.isdigit():
+                await update.message.reply_text("❌ Send user id only.")
+                return ST_ADMIN_INPUT
+            target = int(text)
+            if not is_admin_any(target):
+                await update.message.reply_text("❌ POS must already be admin/helper.")
+                return ConversationHandler.END
+            set_pos_agent(target, uid_admin)
+            await update.message.reply_text(f"✅ Admin {target} is now POS.")
+            return ConversationHandler.END
+
+        if mode == "pos_remove":
+            if not text.isdigit():
+                await update.message.reply_text("❌ Send user id only.")
+                return ST_ADMIN_INPUT
+            target = int(text)
+            remove_pos_agent(target)
+            await update.message.reply_text(f"✅ POS removed: {target}")
+            return ConversationHandler.END
+
+        if mode == "pos_self_addcust":
+            if not text.isdigit():
+                await update.message.reply_text("❌ Send customer id only.")
+                return ST_ADMIN_INPUT
+            add_pos_customer(uid_admin, int(text))
+            await update.message.reply_text(f"✅ Customer {text} added under your POS.")
+            return ConversationHandler.END
+
+        if mode == "pos_self_delcust":
+            if not text.isdigit():
+                await update.message.reply_text("❌ Send customer id only.")
+                return ST_ADMIN_INPUT
+            remove_pos_customer(uid_admin, int(text))
+            await update.message.reply_text(f"✅ Customer {text} removed from your POS.")
+            return ConversationHandler.END
+
+        if mode == "pos_self_price":
+            m = re.match(r"^(del)\s*\|\s*(\d+)\s*\|\s*(\d+)$", text, flags=re.I)
+            if m:
+                cuid, pid = int(m.group(2)), int(m.group(3))
+                delete_pos_child_price(uid_admin, cuid, pid)
+                await update.message.reply_text(f"✅ Child price deleted for customer {cuid} pid {pid}")
+                return ConversationHandler.END
+            m = re.match(r"^(\d+)\s*\|\s*(\d+)\s*\|\s*([\d.]+)$", text)
+            if not m:
+                await update.message.reply_text("❌ Format: customer_id | pid | price\nOr: del | customer_id | pid")
+                return ST_ADMIN_INPUT
+            cuid, pid, price = int(m.group(1)), int(m.group(2)), float(m.group(3))
+            if pos_customer_owner(cuid) != uid_admin:
+                await update.message.reply_text("❌ هذا العميل ليس تابعًا لك.")
+                return ConversationHandler.END
+            set_pos_child_price(uid_admin, cuid, pid, price)
+            await update.message.reply_text(f"✅ Child price saved: customer {cuid} | pid {pid} = {price:.3f}{CURRENCY}")
+            return ConversationHandler.END
+
+        if mode == "pos_self_topup":
+            m = re.match(r"^(\d+)\s*\|\s*([\d.]+)$", text)
+            if not m:
+                await update.message.reply_text("❌ Format: customer_id | amount")
+                return ST_ADMIN_INPUT
+            cuid, amount = int(m.group(1)), float(m.group(2))
+            if pos_customer_owner(cuid) != uid_admin:
+                await update.message.reply_text("❌ هذا العميل ليس تابعًا لك.")
+                return ConversationHandler.END
+            if not charge_balance(uid_admin, amount):
+                await update.message.reply_text("❌ رصيدك غير كافٍ.")
+                return ConversationHandler.END
+            add_balance(cuid, amount)
+            await update.message.reply_text(f"✅ Charged customer {cuid} with +{amount:.3f}{CURRENCY}")
+            try:
+                await context.bot.send_message(cuid, f"✅ POS charged your balance: +{amount:.3f}{CURRENCY}\nPOS ID: {uid_admin}")
+            except Exception:
+                pass
+            return ConversationHandler.END
+
             m = re.match(r"^([A-Z0-9_]+)\s*\|\s*([\d.]+)$", text)
             if not m:
                 await update.message.reply_text("❌ Format: KEY | PRICE\nExample: FF_100 | 0.95")
@@ -2957,517 +3408,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
-# =========================
-# PATCH: Daily Audit + POS + Admin Panels (stable override)
-# =========================
-# Extra schema for ledger/POS
-try:
-    cur.executescript("""
-    CREATE TABLE IF NOT EXISTS balance_ledger(
-      id INTEGER PRIMARY KEY AUTOINCREMENT,
-      user_id INTEGER NOT NULL,
-      delta REAL NOT NULL,
-      kind TEXT NOT NULL DEFAULT 'GENERIC',
-      note TEXT,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS pos_accounts(
-      pos_uid INTEGER PRIMARY KEY,
-      profit_balance REAL NOT NULL DEFAULT 0,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS pos_clients(
-      child_uid INTEGER PRIMARY KEY,
-      pos_uid INTEGER NOT NULL,
-      created_at TEXT NOT NULL DEFAULT (datetime('now'))
-    );
-    CREATE TABLE IF NOT EXISTS pos_product_prices(
-      pos_uid INTEGER NOT NULL,
-      pid INTEGER NOT NULL,
-      price REAL NOT NULL,
-      PRIMARY KEY(pos_uid, pid)
-    );
-    CREATE TABLE IF NOT EXISTS pos_manual_prices(
-      pos_uid INTEGER NOT NULL,
-      pkey TEXT NOT NULL,
-      price REAL NOT NULL,
-      PRIMARY KEY(pos_uid, pkey)
-    );
-    """)
-    con.commit()
-except Exception:
-    pass
-
-
-def log_balance(uid: int, delta: float, kind: str = 'GENERIC', note: str = ''):
-    try:
-        ensure_user_exists(uid)
-        cur.execute(
-            "INSERT INTO balance_ledger(user_id, delta, kind, note) VALUES(?,?,?,?)",
-            (uid, float(delta), (kind or 'GENERIC')[:80], (note or '')[:500]),
-        )
-        con.commit()
-    except Exception:
-        pass
-
-
-_old_add_balance = add_balance
-_old_charge_balance = charge_balance
-
-def add_balance(uid: int, amount: float):
-    _old_add_balance(uid, amount)
-    log_balance(uid, float(amount), 'ADD', 'generic add')
-
-
-def charge_balance(uid: int, amount: float) -> bool:
-    ok = _old_charge_balance(uid, amount)
-    if ok:
-        log_balance(uid, -float(amount), 'CHARGE', 'generic charge')
-    return ok
-
-
-def is_pos(uid: int) -> bool:
-    cur.execute("SELECT 1 FROM pos_accounts WHERE pos_uid=?", (uid,))
-    return cur.fetchone() is not None
-
-
-def add_pos(uid: int):
-    ensure_user_exists(uid)
-    cur.execute("INSERT OR IGNORE INTO pos_accounts(pos_uid, profit_balance) VALUES(?,0)", (uid,))
-    con.commit()
-
-
-def remove_pos(uid: int):
-    cur.execute("DELETE FROM pos_accounts WHERE pos_uid=?", (uid,))
-    cur.execute("DELETE FROM pos_clients WHERE pos_uid=?", (uid,))
-    cur.execute("DELETE FROM pos_product_prices WHERE pos_uid=?", (uid,))
-    cur.execute("DELETE FROM pos_manual_prices WHERE pos_uid=?", (uid,))
-    con.commit()
-
-
-def get_pos_of_child(uid: int) -> int:
-    cur.execute("SELECT pos_uid FROM pos_clients WHERE child_uid=?", (uid,))
-    row = cur.fetchone()
-    return int(row[0]) if row else 0
-
-
-def pos_link_child(pos_uid: int, child_uid: int):
-    ensure_user_exists(child_uid)
-    cur.execute("INSERT OR REPLACE INTO pos_clients(child_uid, pos_uid) VALUES(?,?)", (child_uid, pos_uid))
-    con.commit()
-
-
-def pos_unlink_child(child_uid: int):
-    cur.execute("DELETE FROM pos_clients WHERE child_uid=?", (child_uid,))
-    con.commit()
-
-
-def pos_children(pos_uid: int):
-    cur.execute("SELECT child_uid FROM pos_clients WHERE pos_uid=? ORDER BY child_uid", (pos_uid,))
-    return [int(r[0]) for r in cur.fetchall()]
-
-
-def pos_profit_get(pos_uid: int) -> float:
-    cur.execute("SELECT profit_balance FROM pos_accounts WHERE pos_uid=?", (pos_uid,))
-    row = cur.fetchone()
-    return float(row[0] or 0.0) if row else 0.0
-
-
-def pos_profit_add(pos_uid: int, amount: float):
-    cur.execute("UPDATE pos_accounts SET profit_balance=profit_balance+? WHERE pos_uid=?", (float(amount), pos_uid))
-    con.commit()
-
-
-def pos_profit_take_all(pos_uid: int) -> float:
-    amt = pos_profit_get(pos_uid)
-    cur.execute("UPDATE pos_accounts SET profit_balance=0 WHERE pos_uid=?", (pos_uid,))
-    con.commit()
-    return amt
-
-
-def get_effective_product_price(uid: int, pid: int, default: float) -> float:
-    pos_uid = get_pos_of_child(uid)
-    if pos_uid:
-        cur.execute("SELECT price FROM pos_product_prices WHERE pos_uid=? AND pid=?", (pos_uid, pid))
-        row = cur.fetchone()
-        if row:
-            return float(row[0])
-    return float(default)
-
-
-def get_effective_manual_price(uid: int, key: str, default: float) -> float:
-    pos_uid = get_pos_of_child(uid)
-    if pos_uid:
-        cur.execute("SELECT price FROM pos_manual_prices WHERE pos_uid=? AND pkey=?", (pos_uid, key))
-        row = cur.fetchone()
-        if row:
-            return float(row[0])
-    return float(get_manual_price(key, default))
-
-
-def kb_admin_panel(uid: int) -> InlineKeyboardMarkup:
-    rows = []
-    if admin_role(uid) == ROLE_HELPER:
-        rows = [
-            [InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0")],
-            [InlineKeyboardButton("🧮 Daily Audit", callback_data="admin:dailyaudit")],
-        ]
-        if is_pos(uid):
-            rows.append([InlineKeyboardButton("🏪 POS Panel", callback_data="admin:pos:self")])
-        return InlineKeyboardMarkup(rows)
-
-    rows = [
-        [InlineKeyboardButton("📊 Dashboard", callback_data="admin:dash"), InlineKeyboardButton("👥 Customers", callback_data="admin:users:0")],
-        [InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0"), InlineKeyboardButton("💰 Deposits", callback_data="admin:deps:0")],
-        [InlineKeyboardButton("🛍 Products Control", callback_data="admin:products"), InlineKeyboardButton("🛠 Manual Control", callback_data="admin:manualcontrol")],
-        [InlineKeyboardButton("🧮 Daily Audit", callback_data="admin:dailyaudit"), InlineKeyboardButton("🏪 POS", callback_data="admin:pos")],
-        [InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcastall")],
-        [InlineKeyboardButton("➕ Add Balance", callback_data="admin:addbal"), InlineKeyboardButton("➖ Take Balance", callback_data="admin:takebal")],
-        [InlineKeyboardButton("👑 Admins", callback_data="admin:admins")],
-    ]
-    if is_pos(uid):
-        rows.append([InlineKeyboardButton("🏪 POS Panel", callback_data="admin:pos:self")])
-    return InlineKeyboardMarkup(rows)
-
-
-def kb_admin_products_panel() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📋 Products (PID)", callback_data="admin:listprod"), InlineKeyboardButton("💲 Set Price", callback_data="admin:setprice")],
-        [InlineKeyboardButton("⛔ Toggle Product", callback_data="admin:toggle"), InlineKeyboardButton("🗑 Delete Product", callback_data="admin:delprod")],
-        [InlineKeyboardButton("➕ Add Category", callback_data="admin:addcat"), InlineKeyboardButton("➕ Add Product", callback_data="admin:addprod")],
-        [InlineKeyboardButton("➕ Add Codes (text)", callback_data="admin:addcodes"), InlineKeyboardButton("📄 Add Codes (file)", callback_data="admin:addcodesfile")],
-        [InlineKeyboardButton("🗑 Delete Category", callback_data="admin:delcatfull")],
-        [InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")],
-    ])
-
-
-def kb_manual_control_panel() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🛠 Manual Prices", callback_data="admin:manualprices")],
-        [InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")],
-    ])
-
-
-def kb_daily_audit(target: str = 'today') -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📅 Today", callback_data="admin:dailyaudit"), InlineKeyboardButton("🕘 Yesterday", callback_data="admin:dailyauditday:yesterday")],
-        [InlineKeyboardButton("✍️ Custom Date", callback_data="admin:dailyauditcustom")],
-        [InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")],
-    ])
-
-
-def kb_pos_owner_panel() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add POS", callback_data="admin:pos:add"), InlineKeyboardButton("🗑 Remove POS", callback_data="admin:pos:remove")],
-        [InlineKeyboardButton("📋 POS List", callback_data="admin:pos:list")],
-        [InlineKeyboardButton("🏪 My POS Panel", callback_data="admin:pos:self")],
-        [InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")],
-    ])
-
-
-def kb_pos_self_panel() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("➕ Add Client", callback_data="admin:posself:addclient"), InlineKeyboardButton("🗑 Remove Client", callback_data="admin:posself:removeclient")],
-        [InlineKeyboardButton("💰 Charge Client", callback_data="admin:posself:charge"), InlineKeyboardButton("👥 My Clients", callback_data="admin:posself:clients")],
-        [InlineKeyboardButton("🛍 Product Prices", callback_data="admin:posself:prices"), InlineKeyboardButton("🛠 Manual Prices", callback_data="admin:posself:manualprices")],
-        [InlineKeyboardButton("💸 Transfer Profit", callback_data="admin:posself:cashout")],
-        [InlineKeyboardButton("👑 Admin Home", callback_data="admin:panel")],
-    ])
-
-
-def _audit_date(raw: str) -> str:
-    raw = (raw or '').strip().lower()
-    if raw in ('today', ''):
-        return datetime.utcnow().strftime('%Y-%m-%d')
-    if raw == 'yesterday':
-        return (datetime.utcnow() - timedelta(days=1)).strftime('%Y-%m-%d')
-    return raw
-
-
-def daily_audit_report(day: str) -> str:
-    day = _audit_date(day)
-    start = f"{day} 00:00:00"
-    end = f"{day} 23:59:59"
-    cur.execute("SELECT user_id, balance FROM users ORDER BY user_id")
-    users_rows = cur.fetchall()
-    lines = [f"🧮 *Daily Audit — {day}*", ""]
-    mismatches = 0
-    for uid, bal in users_rows:
-        uid = int(uid)
-        actual = float(bal or 0.0)
-        cur.execute("SELECT COALESCE(SUM(CASE WHEN delta>0 THEN delta ELSE 0 END),0), COALESCE(SUM(CASE WHEN delta<0 THEN -delta ELSE 0 END),0), COUNT(*) FROM balance_ledger WHERE user_id=? AND datetime(created_at)>=datetime(?) AND datetime(created_at)<=datetime(?)", (uid, start, end))
-        money_in, money_out, tx_count = cur.fetchone()
-        money_in = float(money_in or 0.0)
-        money_out = float(money_out or 0.0)
-        opening = actual - money_in + money_out
-        expected = opening + money_in - money_out
-        diff = actual - expected
-        cur.execute("SELECT COALESCE(SUM(total),0) FROM orders WHERE user_id=? AND status='COMPLETED' AND date(created_at)=date(?)", (uid, day))
-        orders_total = float(cur.fetchone()[0] or 0.0)
-        cur.execute("SELECT COALESCE(SUM(price),0) FROM manual_orders WHERE user_id=? AND status='COMPLETED' AND date(created_at)=date(?)", (uid, day))
-        manual_total = float(cur.fetchone()[0] or 0.0)
-        cur.execute("SELECT COALESCE(SUM(amount),0) FROM deposits WHERE user_id=? AND status='APPROVED' AND date(created_at)=date(?)", (uid, day))
-        dep_total = float(cur.fetchone()[0] or 0.0)
-        ledger_gap = (orders_total + manual_total) - money_out
-        dep_gap = dep_total - money_in
-        mismatch = abs(diff) > 1e-6 or abs(ledger_gap) > 1e-6 or abs(dep_gap) > 1e-6
-        if tx_count or orders_total or manual_total or dep_total or mismatch:
-            lines.append(f"👤 `{uid}` | {'⚠️ MISMATCH' if mismatch else '✅ OK'}")
-            lines.append(f"Open: {opening:.3f}{CURRENCY} | In: +{money_in:.3f} | Out: -{money_out:.3f}")
-            lines.append(f"Expected: {expected:.3f}{CURRENCY} | Actual: {actual:.3f}{CURRENCY} | Diff: {diff:+.3f}{CURRENCY} | Tx: {int(tx_count or 0)}")
-            extra = []
-            if abs(ledger_gap) > 1e-6:
-                extra.append(f"salesvsledger={ledger_gap:+.3f}{CURRENCY}")
-            if abs(dep_gap) > 1e-6:
-                extra.append(f"depositsvsledger={dep_gap:+.3f}{CURRENCY}")
-            if extra:
-                lines.append(" | ".join(extra))
-            lines.append("")
-        if mismatch:
-            mismatches += 1
-    lines.append(f"⚠️ Mismatches: {mismatches}")
-    lines.append("🚨 يوجد فرق أو خطأ محاسبي، راجع العملاء المشار إليهم." if mismatches else "✅ No accounting mismatches found.")
-    return "\n".join(lines)[:3900]
-
-
-_old_show_balance = show_balance
-async def show_balance(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid = update.effective_user.id
-    if get_pos_of_child(uid):
-        bal = get_balance(uid)
-        text = (
-            "💰 *Wallet*\n\n"
-            f"👤 ID: `{uid}`\n"
-            f"💎 Balance: *{bal:.3f}* {CURRENCY}\n\n"
-            "🏪 هذا العميل تابع لنقطة بيع. الشحن يتم من خلال نقطة البيع التابعة له."
-        )
-        if update.message:
-            return await update.message.reply_text(text, parse_mode=ParseMode.MARKDOWN)
-        return await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
-    return await _old_show_balance(update, context)
-
-
-_old_admin_input = admin_input
-async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    mode = context.user_data.get(UD_ADMIN_MODE)
-    text = (update.message.text or '').strip() if update.message else ''
-    uid_admin = update.effective_user.id
-    if mode == 'dailyaudit_date':
-        if not re.match(r'^\d{4}-\d{2}-\d{2}$', text):
-            await update.message.reply_text("❌ Format: YYYY-MM-DD\nExample: 2026-03-06")
-            return ST_ADMIN_INPUT
-        await update.message.reply_text(daily_audit_report(text), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_daily_audit(text))
-        return ConversationHandler.END
-    if mode == 'pos_add':
-        if not text.isdigit():
-            await update.message.reply_text("❌ Send POS user_id only")
-            return ST_ADMIN_INPUT
-        add_pos(int(text))
-        await update.message.reply_text(f"✅ POS added: {text}", reply_markup=REPLY_MENU)
-        return ConversationHandler.END
-    if mode == 'pos_remove':
-        if not text.isdigit():
-            await update.message.reply_text("❌ Send POS user_id only")
-            return ST_ADMIN_INPUT
-        remove_pos(int(text))
-        await update.message.reply_text(f"✅ POS removed: {text}", reply_markup=REPLY_MENU)
-        return ConversationHandler.END
-    if mode == 'pos_link_client':
-        m = re.match(r'^(\d+)$', text)
-        if not m:
-            await update.message.reply_text("❌ Send child user_id only")
-            return ST_ADMIN_INPUT
-        pos_uid = uid_admin
-        if not is_pos(pos_uid):
-            await update.message.reply_text("❌ أنت لست نقطة بيع")
-            return ConversationHandler.END
-        pos_link_child(pos_uid, int(m.group(1)))
-        await update.message.reply_text(f"✅ Client linked to POS: {m.group(1)}", reply_markup=REPLY_MENU)
-        return ConversationHandler.END
-    if mode == 'pos_unlink_client':
-        if not text.isdigit():
-            await update.message.reply_text("❌ Send child user_id only")
-            return ST_ADMIN_INPUT
-        pos_unlink_child(int(text))
-        await update.message.reply_text(f"✅ Client unlinked: {text}", reply_markup=REPLY_MENU)
-        return ConversationHandler.END
-    if mode == 'pos_topup_client':
-        m = re.match(r'^(\d+)\s*\|\s*([\d.]+)$', text)
-        if not m:
-            await update.message.reply_text("❌ Format: child_user_id | amount")
-            return ST_ADMIN_INPUT
-        child_uid = int(m.group(1))
-        amount = float(m.group(2))
-        pos_uid = uid_admin
-        if get_pos_of_child(child_uid) != pos_uid:
-            await update.message.reply_text("❌ هذا العميل غير تابع لك")
-            return ConversationHandler.END
-        if not charge_balance(pos_uid, amount):
-            await update.message.reply_text("❌ رصيد نقطة البيع غير كافٍ")
-            return ConversationHandler.END
-        add_balance(child_uid, amount)
-        await update.message.reply_text(f"✅ Charged client {child_uid} with {amount:.3f}{CURRENCY}", reply_markup=REPLY_MENU)
-        return ConversationHandler.END
-    if mode == 'pos_set_price':
-        m = re.match(r'^(\d+)\s*\|\s*([\d.]+)$', text)
-        if not m:
-            await update.message.reply_text("❌ Format: pid | price")
-            return ST_ADMIN_INPUT
-        pid = int(m.group(1)); price = float(m.group(2))
-        cur.execute("INSERT OR REPLACE INTO pos_product_prices(pos_uid, pid, price) VALUES(?,?,?)", (uid_admin, pid, price))
-        con.commit()
-        await update.message.reply_text(f"✅ POS product price saved. PID {pid} = {price:.3f}{CURRENCY}", reply_markup=REPLY_MENU)
-        return ConversationHandler.END
-    if mode == 'pos_set_manual_price':
-        m = re.match(r'^([A-Z0-9_]+)\s*\|\s*([\d.]+)$', text, flags=re.IGNORECASE)
-        if not m:
-            await update.message.reply_text("❌ Format: KEY | PRICE\nExample: FF_100 | 0.90")
-            return ST_ADMIN_INPUT
-        key = m.group(1).upper(); price = float(m.group(2))
-        cur.execute("INSERT OR REPLACE INTO pos_manual_prices(pos_uid, pkey, price) VALUES(?,?,?)", (uid_admin, key, price))
-        con.commit()
-        await update.message.reply_text(f"✅ POS manual price saved. {key} = {price:.3f}{CURRENCY}", reply_markup=REPLY_MENU)
-        return ConversationHandler.END
-    return await _old_admin_input(update, context)
-
-
-_old_on_callback = on_callback
-async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    data = q.data or ''
-    uid = update.effective_user.id
-    # explicit stable handlers before old generic admin catcher
-    if data == 'admin:dailyaudit':
-        await q.answer()
-        if not is_admin_any(uid):
-            return await q.edit_message_text('❌ Not allowed.')
-        return await q.edit_message_text(daily_audit_report('today'), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_daily_audit('today'))
-    if data.startswith('admin:dailyauditday:'):
-        await q.answer()
-        if not is_admin_any(uid):
-            return await q.edit_message_text('❌ Not allowed.')
-        day = data.split(':', 2)[2]
-        return await q.edit_message_text(daily_audit_report(day), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_daily_audit(day))
-    if data == 'admin:dailyauditcustom':
-        await q.answer()
-        context.user_data[UD_ADMIN_MODE] = 'dailyaudit_date'
-        await q.edit_message_text('📅 Send date as: `YYYY-MM-DD`', parse_mode=ParseMode.MARKDOWN)
-        return ST_ADMIN_INPUT
-    if data == 'admin:products':
-        await q.answer()
-        return await q.edit_message_text('🛍 *Products Control*', parse_mode=ParseMode.MARKDOWN, reply_markup=kb_admin_products_panel())
-    if data == 'admin:manualcontrol':
-        await q.answer()
-        return await q.edit_message_text('🛠 *Manual Control*', parse_mode=ParseMode.MARKDOWN, reply_markup=kb_manual_control_panel())
-    if data == 'admin:pos':
-        await q.answer()
-        if admin_role(uid) != ROLE_OWNER:
-            return await q.edit_message_text('❌ Not allowed.')
-        return await q.edit_message_text('🏪 *POS Manager*', parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_owner_panel())
-    if data == 'admin:pos:add':
-        await q.answer(); context.user_data[UD_ADMIN_MODE] = 'pos_add'
-        await q.edit_message_text('➕ Send POS user_id')
-        return ST_ADMIN_INPUT
-    if data == 'admin:pos:remove':
-        await q.answer(); context.user_data[UD_ADMIN_MODE] = 'pos_remove'
-        await q.edit_message_text('🗑 Send POS user_id to remove')
-        return ST_ADMIN_INPUT
-    if data == 'admin:pos:list':
-        await q.answer()
-        cur.execute('SELECT pos_uid, profit_balance FROM pos_accounts ORDER BY pos_uid')
-        rows = cur.fetchall()
-        if not rows:
-            return await q.edit_message_text('📋 No POS found.', reply_markup=kb_pos_owner_panel())
-        lines = ['🏪 *POS List*', '']
-        for pos_uid, profit in rows:
-            lines.append(f'• `{int(pos_uid)}` | profit: *{float(profit):.3f}{CURRENCY}* | clients: {len(pos_children(int(pos_uid)))}')
-        return await q.edit_message_text('\n'.join(lines)[:3800], parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_owner_panel())
-    if data == 'admin:pos:self':
-        await q.answer()
-        if not is_pos(uid):
-            return await q.edit_message_text('❌ هذه العضوية ليست نقطة بيع.')
-        prof = pos_profit_get(uid)
-        txt = f"🏪 *POS Panel*\n\n👤 POS ID: `{uid}`\n💰 POS Balance: *{get_balance(uid):.3f}{CURRENCY}*\n📈 Profit Waiting: *{prof:.3f}{CURRENCY}*\n👥 Clients: *{len(pos_children(uid))}*"
-        return await q.edit_message_text(txt, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_self_panel())
-    if data == 'admin:posself:addclient':
-        await q.answer(); context.user_data[UD_ADMIN_MODE] = 'pos_link_client'
-        await q.edit_message_text('➕ Send child user_id to link under your POS')
-        return ST_ADMIN_INPUT
-    if data == 'admin:posself:removeclient':
-        await q.answer(); context.user_data[UD_ADMIN_MODE] = 'pos_unlink_client'
-        await q.edit_message_text('🗑 Send child user_id to unlink from your POS')
-        return ST_ADMIN_INPUT
-    if data == 'admin:posself:charge':
-        await q.answer(); context.user_data[UD_ADMIN_MODE] = 'pos_topup_client'
-        await q.edit_message_text('💰 Send: `child_user_id | amount`', parse_mode=ParseMode.MARKDOWN)
-        return ST_ADMIN_INPUT
-    if data == 'admin:posself:clients':
-        await q.answer()
-        ids = pos_children(uid)
-        if not ids:
-            return await q.edit_message_text('👥 No clients linked yet.', reply_markup=kb_pos_self_panel())
-        lines = ['👥 *POS Clients*', '']
-        for x in ids:
-            lines.append(f'• `{x}` | balance: *{get_balance(x):.3f}{CURRENCY}*')
-        return await q.edit_message_text('\n'.join(lines)[:3800], parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_self_panel())
-    if data == 'admin:posself:prices':
-        await q.answer(); context.user_data[UD_ADMIN_MODE] = 'pos_set_price'
-        cur.execute('SELECT pid, title, price FROM products WHERE active=1 ORDER BY pid LIMIT 80')
-        rows = cur.fetchall()
-        lines = ['🛍 *POS Product Prices*', 'Send: `pid | price`', '']
-        for pid, title, price in rows:
-            lines.append(f'PID `{pid}` | *{float(price):.3f}{CURRENCY}* | {title}')
-        await q.edit_message_text('\n'.join(lines)[:3900], parse_mode=ParseMode.MARKDOWN)
-        return ST_ADMIN_INPUT
-    if data == 'admin:posself:manualprices':
-        await q.answer(); context.user_data[UD_ADMIN_MODE] = 'pos_set_manual_price'
-        rows = []
-        cur.execute('SELECT pkey, price FROM manual_prices ORDER BY pkey')
-        rows = cur.fetchall()
-        lines = ['🛠 *POS Manual Prices*', 'Send: `KEY | PRICE`', '']
-        for k, p in rows:
-            lines.append(f'• `{k}` = *{float(p):.3f}{CURRENCY}*')
-        await q.edit_message_text('\n'.join(lines)[:3800], parse_mode=ParseMode.MARKDOWN)
-        return ST_ADMIN_INPUT
-    if data == 'admin:posself:cashout':
-        await q.answer()
-        if not is_pos(uid):
-            return await q.edit_message_text('❌ هذه العضوية ليست نقطة بيع.')
-        amt = pos_profit_take_all(uid)
-        if amt <= 0:
-            return await q.edit_message_text('❌ No profit to transfer.', reply_markup=kb_pos_self_panel())
-        add_balance(uid, amt)
-        return await q.edit_message_text(f'✅ Profit transferred to POS balance: +{amt:.3f}{CURRENCY}', reply_markup=kb_pos_self_panel())
-    if data.startswith('admin:manual:approve:'):
-        await q.answer()
-        if not is_manual_admin(uid):
-            return await q.edit_message_text('❌ Not allowed.')
-        mid = int(data.split(':')[3])
-        cur.execute("SELECT user_id, price, status, plan_title FROM manual_orders WHERE id=?", (mid,))
-        row = cur.fetchone()
-        if not row:
-            return await q.edit_message_text('❌ Manual order not found.')
-        target_uid, price, status, plan_title = int(row[0]), float(row[1]), row[2], row[3]
-        if status != 'PENDING':
-            return await q.edit_message_text('❌ This manual order is not pending.')
-        cur.execute("UPDATE manual_orders SET status='COMPLETED', approved_by=? WHERE id=?", (uid, mid))
-        con.commit()
-        try:
-            await context.bot.send_message(
-                chat_id=target_uid,
-                text=(
-                    "✅ *تم شحن بنجاح!*\n"
-                    f"🧾 Manual Order: *#{mid}*\n"
-                    f"📦 Service: {plan_title}\n"
-                    f"💵 Paid: *{price:.3f} {CURRENCY}*\n"
-                    f"👮 Approved by Admin ID: `{uid}`\n\n"
-                    "شكراً لك ❤️"
-                ),
-                parse_mode=ParseMode.MARKDOWN,
-            )
-        except Exception:
-            pass
-        return await q.edit_message_text(f'✅ Manual order #{mid} approved.', reply_markup=kb_admin_panel(uid))
-    return await _old_on_callback(update, context)
