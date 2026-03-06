@@ -544,6 +544,21 @@ async def notify_manual_order_admins(context: ContextTypes.DEFAULT_TYPE, message
             await context.bot.send_message(chat_id=aid, text=message_text, parse_mode=ParseMode.MARKDOWN)
         except Exception:
             logger.exception("Failed notifying admin %s", aid)
+async def broadcast_to_all_users(context: ContextTypes.DEFAULT_TYPE, message_text: str) -> Tuple[int, int]:
+    cur.execute("SELECT user_id FROM users ORDER BY user_id")
+    rows = cur.fetchall()
+    sent = 0
+    failed = 0
+    for row in rows:
+        uid = int(row[0])
+        try:
+            await context.bot.send_message(chat_id=uid, text=message_text)
+            sent += 1
+        except Exception:
+            failed += 1
+            logger.exception("Broadcast failed to %s", uid)
+    return sent, failed
+
 async def send_audit_alert(context: ContextTypes.DEFAULT_TYPE, audit_date: str, uid: int, issue_key: str, message_text: str):
     try:
         cur.execute("INSERT INTO audit_alerts(audit_date, user_id, issue_key) VALUES(?,?,?)", (audit_date, uid, issue_key[:180]))
@@ -737,7 +752,7 @@ def kb_admin_panel(uid: int) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("🧮 Daily Audit", callback_data="admin:dailyauditday:today"), InlineKeyboardButton("📥 Manual Orders", callback_data="admin:manuallist:0")],
             [InlineKeyboardButton("🛍 Products Control", callback_data="admin:products"), InlineKeyboardButton("🛠 Manual Control", callback_data="admin:manualprices")],
             [InlineKeyboardButton("➕ Add Balance", callback_data="admin:addbal"), InlineKeyboardButton("➖ Take Balance", callback_data="admin:takebal")],
-            [InlineKeyboardButton("👑 Admins", callback_data="admin:admins")],
+            [InlineKeyboardButton("📢 Broadcast", callback_data="admin:broadcastall"), InlineKeyboardButton("👑 Admins", callback_data="admin:admins")],
         ]
     )
 def kb_admin_products_panel() -> InlineKeyboardMarkup:
@@ -1791,6 +1806,15 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data[UD_ADMIN_MODE] = "admins_manage"
         await q.edit_message_text("\n".join(lines)[:3800], parse_mode=ParseMode.MARKDOWN)
         return ST_ADMIN_INPUT
+    if data == "admin:broadcastall":
+        if admin_role(update.effective_user.id) != ROLE_OWNER:
+            return await q.edit_message_text("❌ Not allowed.")
+        context.user_data[UD_ADMIN_MODE] = "broadcast_all"
+        await q.edit_message_text(
+            "📢 *Broadcast to all users*\n\nSend the message now. It will be sent to all users.\n\n/cancel to stop",
+            parse_mode=ParseMode.MARKDOWN,
+        )
+        return ST_ADMIN_INPUT
     if data == "admin:products":
         if admin_role(update.effective_user.id) != ROLE_OWNER:
             return await q.edit_message_text("❌ Not allowed.")
@@ -2023,7 +2047,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "✅ *تم شحن بنجاح!*\n"
                     f"🧾 Manual Order: *#{mid}*\n"
                     f"📦 Service: {plan_title}\n"
-                    f"💵 Paid: *{price:.3f} {CURRENCY}*\n\n"
+                    f"💵 Paid: *{price:.3f} {CURRENCY}*\n"
+                    f"👨‍💼 Approved by admin: `{approver_id}`\n\n"
                     "شكراً لك ❤️"
                 ),
                 parse_mode=ParseMode.MARKDOWN,
@@ -2459,6 +2484,17 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return ST_ADMIN_INPUT
             report = await _daily_audit_report_with_alerts(context, text)
             await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_daily_audit(text))
+            return ConversationHandler.END
+        if mode == "broadcast_all":
+            if admin_role(uid_admin) != ROLE_OWNER:
+                await update.message.reply_text("❌ Not allowed.")
+                return ConversationHandler.END
+            msg = (update.message.text or "").strip()
+            if not msg:
+                await update.message.reply_text("❌ Send message text first.")
+                return ST_ADMIN_INPUT
+            sent, failed = await broadcast_to_all_users(context, f"📢 إشعار من الإدارة\n\n{msg}")
+            await update.message.reply_text(f"✅ Broadcast finished.\nSent: {sent}\nFailed: {failed}", reply_markup=REPLY_MENU)
             return ConversationHandler.END
         if admin_role(uid_admin) != ROLE_OWNER:
             await update.message.reply_text("❌ Not allowed.")
