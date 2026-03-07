@@ -605,6 +605,21 @@ def ensure_user_exists(user_id: int, username: str = "", first_name: str = ""):
         (user_id, username, first_name),
     )
     con.commit()
+
+def get_user_brief(user_id: int) -> str:
+    ensure_user_exists(user_id)
+    cur.execute("SELECT username, first_name FROM users WHERE user_id=?", (user_id,))
+    row = cur.fetchone()
+    if not row:
+        return f"{user_id}"
+    username = (row[0] or "").strip()
+    first_name = (row[1] or "").strip()
+    label = f"{user_id}"
+    if username:
+        label += f" (@{username})"
+    elif first_name:
+        label += f" ({first_name})"
+    return label
 def is_suspended(uid: int) -> bool:
     ensure_user_exists(uid)
     cur.execute("SELECT suspended FROM users WHERE user_id=?", (uid,))
@@ -1047,6 +1062,9 @@ def add_reseller(uid: int):
 
 def remove_reseller(uid: int):
     cur.execute("DELETE FROM reseller_clients WHERE reseller_id=?", (uid,))
+    cur.execute("DELETE FROM pos_product_prices WHERE reseller_id=?", (uid,))
+    cur.execute("DELETE FROM pos_manual_prices WHERE reseller_id=?", (uid,))
+    cur.execute("DELETE FROM reseller_profit_log WHERE reseller_id=?", (uid,))
     cur.execute("DELETE FROM resellers WHERE user_id=?", (uid,))
     con.commit()
 
@@ -1105,6 +1123,15 @@ def assign_client_to_reseller(reseller_id: int, client_uid: int) -> Tuple[bool, 
 def remove_client_from_reseller(reseller_id: int, client_uid: int) -> bool:
     cur.execute("DELETE FROM reseller_clients WHERE reseller_id=? AND client_user_id=?", (reseller_id, client_uid))
     ch = cur.rowcount
+    if ch:
+        cur.execute(
+            "DELETE FROM pos_product_prices WHERE reseller_id=? AND client_user_id=?",
+            (reseller_id, client_uid),
+        )
+        cur.execute(
+            "DELETE FROM pos_manual_prices WHERE reseller_id=? AND client_user_id=?",
+            (reseller_id, client_uid),
+        )
     con.commit()
     return bool(ch)
 
@@ -1576,6 +1603,9 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
     ensure_user_exists(ADMIN_ID)
     await update.message.reply_text("✅ Bot is online! 🚀", reply_markup=REPLY_MENU)
+async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    upsert_user(update.effective_user)
+    await update.message.reply_text(f"🆔 Your ID: `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_MENU)
 async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user and must_block_user(update):
         return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
@@ -1660,6 +1690,8 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await show_support(update, context)
         return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
     t = (update.message.text or "").strip()
+    if t.lower() == "id":
+        return await update.message.reply_text(f"🆔 Your ID: `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_MENU)
     if t == "🛒 Our Products":
         return await show_categories(update, context)
     if t == "💰 My Balance":
@@ -3217,7 +3249,22 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text.isdigit():
             await update.message.reply_text("❌ Send client user_id only.")
             return ST_ADMIN_INPUT
-        ok, msg = assign_client_to_reseller(uid_admin, int(text))
+        client_uid = int(text)
+        ok, msg = assign_client_to_reseller(uid_admin, client_uid)
+        if ok:
+            try:
+                await context.bot.send_message(
+                    client_uid,
+                    (
+                        "✅ تم ربط حسابك بنقطة بيع داخل البوت.\n"
+                        f"🏪 POS ID: `{uid_admin}`\n"
+                        "🛒 الآن أي أسعار خاصة بنقطة البيع ستظهر لك تلقائياً داخل المنتجات والخدمات اليدوية."
+                    ),
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=REPLY_MENU,
+                )
+            except Exception:
+                logger.exception("Failed notifying client %s about POS attach", client_uid)
         await update.message.reply_text(("✅ " if ok else "❌ ") + msg, reply_markup=REPLY_MENU)
         return ConversationHandler.END
     if mode == "pos_remove_client":
@@ -3227,7 +3274,17 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text.isdigit():
             await update.message.reply_text("❌ Send client user_id only.")
             return ST_ADMIN_INPUT
-        ok = remove_client_from_reseller(uid_admin, int(text))
+        client_uid = int(text)
+        ok = remove_client_from_reseller(uid_admin, client_uid)
+        if ok:
+            try:
+                await context.bot.send_message(
+                    client_uid,
+                    "ℹ️ تم فك ربطك من نقطة البيع داخل البوت. عادت أسعارك الافتراضية.",
+                    reply_markup=REPLY_MENU,
+                )
+            except Exception:
+                logger.exception("Failed notifying client %s about POS detach", client_uid)
         await update.message.reply_text(("✅ Client removed." if ok else "❌ Client not found under your POS."), reply_markup=REPLY_MENU)
         return ConversationHandler.END
     if mode == "pos_set_price":
@@ -3372,8 +3429,13 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not text.isdigit():
             await update.message.reply_text("❌ Send user_id only.")
             return ST_ADMIN_INPUT
-        remove_reseller(int(text))
-        await update.message.reply_text(f"✅ Removed POS: {int(text)}", reply_markup=REPLY_MENU)
+        target = int(text)
+        remove_reseller(target)
+        try:
+            await context.bot.send_message(target, "ℹ️ تم إلغاء تفعيل نقطة البيع الخاصة بك.", reply_markup=REPLY_MENU)
+        except Exception:
+            logger.exception("Failed notifying reseller %s about removal", target)
+        await update.message.reply_text(f"✅ Removed POS: {target}", reply_markup=REPLY_MENU)
         return ConversationHandler.END
     # helper limitation
     if admin_role(uid_admin) == ROLE_HELPER:
@@ -3913,6 +3975,7 @@ def build_app():
         allow_reentry=True,
     )
     app.add_handler(CommandHandler("start", start_cmd))
+    app.add_handler(CommandHandler("id", id_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("approvedep", approvedep_cmd))
     app.add_handler(CommandHandler("rejectdep", rejectdep_cmd))
