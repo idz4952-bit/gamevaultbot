@@ -975,6 +975,66 @@ def pos_all_manual_keys_text(client_uid: Optional[int] = None) -> str:
         lines.append(f"• `{key}` | Base *{float(effective):.3f}{CURRENCY}*")
     return "\n".join(lines)[:3800]
 
+
+def shahid_plan_to_price_key(plan_title: str) -> Optional[str]:
+    t = (plan_title or "").upper()
+    if "12" in t:
+        return "SHAHID_MENA_12M"
+    if "3" in t:
+        return "SHAHID_MENA_3M"
+    return None
+
+
+def ff_title_to_sku(title: str) -> Optional[str]:
+    t = (title or "").strip()
+    for sku, pack_title, _ in FF_PACKS:
+        if pack_title == t:
+            return sku
+    return None
+
+
+def calculate_pos_manual_profit(reseller_id: Optional[int], client_uid: int, service: str, plan_title: str, note: str = "") -> Tuple[float, str]:
+    if not reseller_id:
+        return 0.0, ""
+    total_margin = 0.0
+    details = []
+    service = (service or "").upper().strip()
+    if service == "SHAHID":
+        key = shahid_plan_to_price_key(plan_title)
+        if key and has_pos_manual_price(reseller_id, client_uid, key):
+            sell = get_pos_manual_price(reseller_id, client_uid, key) or 0.0
+            base = get_effective_manual_base_for_pos(client_uid, key)
+            margin = max(0.0, float(sell) - float(base))
+            if margin > 1e-9:
+                total_margin += margin
+                details.append(f"{key} +{margin:.3f}{CURRENCY}")
+        return total_margin, " | ".join(details)
+    if service == "FREEFIRE_MENA":
+        for raw_line in (note or "").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            m = re.match(r"^(.+?)\s+x(\d+)\s*\|", line)
+            if not m:
+                continue
+            title = m.group(1).strip()
+            qty = int(m.group(2))
+            if qty <= 0:
+                continue
+            sku = ff_title_to_sku(title)
+            if not sku or not has_pos_manual_price(reseller_id, client_uid, sku):
+                continue
+            sell = get_pos_manual_price(reseller_id, client_uid, sku) or 0.0
+            base = get_effective_manual_base_for_pos(client_uid, sku)
+            margin_each = max(0.0, float(sell) - float(base))
+            if margin_each <= 1e-9:
+                continue
+            margin = margin_each * qty
+            total_margin += margin
+            details.append(f"{sku} x{qty} +{margin:.3f}{CURRENCY}")
+        return total_margin, " | ".join(details)
+    return 0.0, ""
+
 def is_reseller(uid: int) -> bool:
     cur.execute("SELECT active FROM resellers WHERE user_id=?", (uid,))
     row = cur.fetchone()
@@ -2252,7 +2312,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text("❌ POS only.")
         context.user_data[UD_ADMIN_MODE] = "pos_set_price"
         await q.edit_message_text(
-            "🎯 *Set Client Price*\n\nFormat:\n`client_user_id | pid | price`\nExample:\n`1997968014 | 12 | 10`\n\nDelete custom price:\n`del | client_user_id | pid`\n\n⚠️ لا يمكن أقل من سعر البوت الأساسي.\n\n/cancel to stop",
+            (
+                "🎯 *Set Client Price*\n\nFormat:\n`client_user_id | pid | price`\nExample:\n`1997968014 | 12 | 10`\n\nDelete custom price:\n`del | client_user_id | pid`\n\n⚠️ لا يمكن أقل من سعر البوت الأساسي.\n\n"
+                + pos_all_products_text()
+                + "\n\n/cancel to stop"
+            )[:3900],
             parse_mode=ParseMode.MARKDOWN,
         )
         return ST_ADMIN_INPUT
@@ -2270,16 +2334,17 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text("❌ POS only.")
         context.user_data[UD_ADMIN_MODE] = "pos_set_manual_price"
         await q.edit_message_text(
-            "🛠 *Set Client Manual Price*\n\n"
-            "Set/Update:\n"
-            "`client_user_id | KEY | price`\n"
-            "Example:\n"
-            "`1997968014 | FF_100 | 0.95`\n\n"
-            "Delete custom manual price:\n"
-            "`del | client_user_id | KEY`\n\n"
-            "Allowed keys:\n"
-            "`SHAHID_MENA_3M`, `SHAHID_MENA_12M`, `FF_100`, `FF_210`, `FF_530`, `FF_1080`, `FF_2200`\n\n"
-            "/cancel to stop",
+            (
+                "🛠 *Set Client Manual Price*\n\n"
+                "Set/Update:\n"
+                "`client_user_id | KEY | price`\n"
+                "Example:\n"
+                "`1997968014 | FF_100 | 0.95`\n\n"
+                "Delete custom manual price:\n"
+                "`del | client_user_id | KEY`\n\n"
+                + pos_all_manual_keys_text()
+                + "\n\n/cancel to stop"
+            )[:3900],
             parse_mode=ParseMode.MARKDOWN,
         )
         return ST_ADMIN_INPUT
@@ -2733,11 +2798,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not is_manual_admin(update.effective_user.id):
             return await q.edit_message_text("❌ Not allowed.")
         mid = int(data.split(":")[3])
-        cur.execute("SELECT user_id, price, status, service, plan_title FROM manual_orders WHERE id=?", (mid,))
+        cur.execute("SELECT user_id, price, status, service, plan_title, note FROM manual_orders WHERE id=?", (mid,))
         row = cur.fetchone()
         if not row:
             return await q.edit_message_text("❌ Manual order not found.")
-        uid, price, status, service, plan_title = int(row[0]), float(row[1]), row[2], row[3], row[4]
+        uid, price, status, service, plan_title, manual_note = int(row[0]), float(row[1]), row[2], row[3], row[4], (row[5] or "")
         if status != "PENDING":
             return await q.edit_message_text("❌ This manual order is not pending.")
         approver_id = update.effective_user.id
@@ -2760,18 +2825,24 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             logger.exception("Failed to notify user %s about manual approve %s: %s", uid, mid, e)
         reseller_id = get_client_reseller_id(uid)
-        manual_base_price = get_effective_manual_base_for_pos(uid, service)
-        manual_margin = float(price) - float(manual_base_price)
-        if reseller_id and manual_margin > 1e-9 and has_pos_manual_price(reseller_id, uid, service):
-            add_reseller_profit(reseller_id, manual_margin, "POS_MANUAL_MARGIN", str(mid), f"client={uid} service={service}")
+        manual_margin, manual_margin_details = calculate_pos_manual_profit(
+            reseller_id,
+            uid,
+            service,
+            plan_title,
+            manual_note,
+        )
+        if reseller_id and manual_margin > 1e-9:
+            add_reseller_profit(reseller_id, manual_margin, "POS_MANUAL_MARGIN", str(mid), f"client={uid} service={service} details={manual_margin_details}")
             try:
+                detail_text = f"\nDetails: {manual_margin_details}" if manual_margin_details else ""
                 await context.bot.send_message(
                     chat_id=reseller_id,
                     text=(
                         "💰 *POS Profit Added*\n"
                         f"Client: `{uid}`\n"
                         f"Manual Order: *#{mid}*\n"
-                        f"Margin added: *{manual_margin:.3f}{CURRENCY}*\n"
+                        f"Margin added: *{manual_margin:.3f}{CURRENCY}*{detail_text}\n"
                         f"Pending profit: *{reseller_profit_balance(reseller_id):.3f}{CURRENCY}*"
                     ),
                     parse_mode=ParseMode.MARKDOWN,
