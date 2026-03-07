@@ -934,6 +934,33 @@ def pos_panel_text(uid: int) -> str:
     )
 
 
+def kb_pos_guest() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("💬 Contact Support", url=to_tme(SUPPORT_CHAT))],
+            [InlineKeyboardButton("⬅️ Back", callback_data="goto:cats")],
+        ]
+    )
+
+
+def pos_guest_text(uid: int) -> str:
+    reseller_id = get_client_reseller_id(uid)
+    if reseller_id is not None:
+        return (
+            "🏪 *POS Panel*\n\n"
+            f"👤 Your ID: `{uid}`\n"
+            f"🔗 Linked POS: `{reseller_id}`\n\n"
+            "أنت عميل تابع لنقطة بيع، لذلك الأسعار الخاصة تطبق تلقائياً عند الشراء.\n"
+            "لشحن الرصيد تواصل مع نقطة البيع التابعة لك أو مع الدعم."
+        )
+    return (
+        "🏪 *POS Panel*\n\n"
+        f"👤 Your ID: `{uid}`\n\n"
+        "هذه القائمة تعمل فقط للحسابات المفعلة كنقطة بيع.\n"
+        "أرسل الـ ID الخاص بك للإدارة ليتم تفعيلك كنقطة بيع، أو تواصل مع الدعم."
+    )
+
+
 def kb_reseller_admin_panel() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
@@ -1413,9 +1440,12 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if t == "☎️ Contact Support":
         return await show_support(update, context)
     if t == "🏪 POS Panel":
-        if not is_reseller(update.effective_user.id):
-            return await update.message.reply_text("❌ هذه القائمة متاحة لنقاط البيع فقط.", reply_markup=REPLY_MENU)
-        return await update.message.reply_text(pos_panel_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
+        uid = update.effective_user.id
+        if is_reseller(uid):
+            return await update.message.reply_text(pos_panel_text(uid), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(uid))
+        if admin_role(uid) == ROLE_OWNER:
+            return await update.message.reply_text(reseller_admin_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_reseller_admin_panel())
+        return await update.message.reply_text(pos_guest_text(uid), parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_MENU)
     if t == "⚡ Manual Order":
         # ✅ enforce hours
         if not manual_open_now() and not is_admin_any(update.effective_user.id):
@@ -2009,9 +2039,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "goto:balance" or data == "goto:topup":
         return await show_balance(update, context)
     if data == "pos:panel":
-        if not is_reseller(update.effective_user.id):
-            return await q.edit_message_text("❌ POS only.")
-        return await q.edit_message_text(pos_panel_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
+        uid = update.effective_user.id
+        if is_reseller(uid):
+            return await q.edit_message_text(pos_panel_text(uid), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(uid))
+        if admin_role(uid) == ROLE_OWNER:
+            return await q.edit_message_text(reseller_admin_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_reseller_admin_panel())
+        return await q.edit_message_text(pos_guest_text(uid), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_guest())
     if data == "pos:clients":
         if not is_reseller(update.effective_user.id):
             return await q.edit_message_text("❌ POS only.")
