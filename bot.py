@@ -335,6 +335,40 @@ def ensure_schema():
     try:
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS pos_product_prices(
+              reseller_id INTEGER NOT NULL,
+              client_user_id INTEGER NOT NULL,
+              pid INTEGER NOT NULL,
+              price REAL NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY(reseller_id, client_user_id, pid)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pos_product_prices_client_pid ON pos_product_prices(client_user_id, pid)")
+        con.commit()
+    except Exception:
+        pass
+    try:
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS pos_manual_prices(
+              reseller_id INTEGER NOT NULL,
+              client_user_id INTEGER NOT NULL,
+              pkey TEXT NOT NULL,
+              price REAL NOT NULL,
+              created_at TEXT NOT NULL DEFAULT (datetime('now')),
+              PRIMARY KEY(reseller_id, client_user_id, pkey)
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_pos_manual_prices_client_key ON pos_manual_prices(client_user_id, pkey)")
+        con.commit()
+    except Exception:
+        pass
+    try:
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS resellers(
               user_id INTEGER PRIMARY KEY,
               active INTEGER NOT NULL DEFAULT 1,
@@ -639,6 +673,21 @@ async def broadcast_to_all_users(context: ContextTypes.DEFAULT_TYPE, message_tex
             logger.exception("Broadcast failed to %s", uid)
     return sent, failed
 
+async def broadcast_to_reseller_clients(context: ContextTypes.DEFAULT_TYPE, reseller_id: int, message_text: str) -> Tuple[int, int]:
+    cur.execute("SELECT client_user_id FROM reseller_clients WHERE reseller_id=? ORDER BY client_user_id", (reseller_id,))
+    rows = cur.fetchall()
+    sent = 0
+    failed = 0
+    for row in rows:
+        uid = int(row[0])
+        try:
+            await context.bot.send_message(chat_id=uid, text=message_text)
+            sent += 1
+        except Exception:
+            failed += 1
+            logger.exception("POS broadcast failed to %s", uid)
+    return sent, failed
+
 async def send_audit_alert(context: ContextTypes.DEFAULT_TYPE, audit_date: str, uid: int, issue_key: str, message_text: str):
     try:
         cur.execute("INSERT INTO audit_alerts(audit_date, user_id, issue_key) VALUES(?,?,?)", (audit_date, uid, issue_key[:180]))
@@ -804,6 +853,104 @@ def clear_user_manual_price(uid: int, key: str):
     cur.execute("DELETE FROM user_manual_prices WHERE user_id=? AND pkey=?", (uid, key))
     con.commit()
 
+def get_pos_client_product_price(reseller_id: int, client_uid: int, pid: int) -> Optional[float]:
+    cur.execute("SELECT price FROM pos_product_prices WHERE reseller_id=? AND client_user_id=? AND pid=?", (reseller_id, client_uid, pid))
+    row = cur.fetchone()
+    return float(row[0]) if row else None
+
+def has_pos_client_product_price(reseller_id: int, client_uid: int, pid: int) -> bool:
+    cur.execute("SELECT 1 FROM pos_product_prices WHERE reseller_id=? AND client_user_id=? AND pid=?", (reseller_id, client_uid, pid))
+    return cur.fetchone() is not None
+
+def set_pos_client_product_price(reseller_id: int, client_uid: int, pid: int, price: float):
+    cur.execute(
+        "INSERT INTO pos_product_prices(reseller_id, client_user_id, pid, price) VALUES(?,?,?,?) ON CONFLICT(reseller_id, client_user_id, pid) DO UPDATE SET price=excluded.price",
+        (reseller_id, client_uid, pid, float(price)),
+    )
+    con.commit()
+
+def clear_pos_client_product_price(reseller_id: int, client_uid: int, pid: int):
+    cur.execute("DELETE FROM pos_product_prices WHERE reseller_id=? AND client_user_id=? AND pid=?", (reseller_id, client_uid, pid))
+    con.commit()
+
+def get_pos_client_manual_price(reseller_id: int, client_uid: int, key: str) -> Optional[float]:
+    cur.execute("SELECT price FROM pos_manual_prices WHERE reseller_id=? AND client_user_id=? AND pkey=?", (reseller_id, client_uid, key))
+    row = cur.fetchone()
+    return float(row[0]) if row else None
+
+def has_pos_client_manual_price(reseller_id: int, client_uid: int, key: str) -> bool:
+    cur.execute("SELECT 1 FROM pos_manual_prices WHERE reseller_id=? AND client_user_id=? AND pkey=?", (reseller_id, client_uid, key))
+    return cur.fetchone() is not None
+
+def set_pos_client_manual_price(reseller_id: int, client_uid: int, key: str, price: float):
+    cur.execute(
+        "INSERT INTO pos_manual_prices(reseller_id, client_user_id, pkey, price) VALUES(?,?,?,?) ON CONFLICT(reseller_id, client_user_id, pkey) DO UPDATE SET price=excluded.price",
+        (reseller_id, client_uid, key, float(price)),
+    )
+    con.commit()
+
+def clear_pos_client_manual_price(reseller_id: int, client_uid: int, key: str):
+    cur.execute("DELETE FROM pos_manual_prices WHERE reseller_id=? AND client_user_id=? AND pkey=?", (reseller_id, client_uid, key))
+    con.commit()
+
+def effective_product_price(uid: int, pid: int, default_price: Optional[float] = None) -> float:
+    reseller_id = get_client_reseller_id(uid)
+    if reseller_id is not None:
+        p = get_pos_client_product_price(reseller_id, uid, pid)
+        if p is not None:
+            return float(p)
+    return get_user_product_price(uid, pid, default_price)
+
+def effective_manual_price(uid: Optional[int], key: str, default_price: Optional[float] = None) -> float:
+    if uid is not None:
+        reseller_id = get_client_reseller_id(uid)
+        if reseller_id is not None:
+            p = get_pos_client_manual_price(reseller_id, uid, key)
+            if p is not None:
+                return float(p)
+    return get_user_manual_price(uid, key, default_price)
+
+def pos_client_prices_text(reseller_id: int) -> str:
+    lines = ["📌 *POS Client Prices*", f"POS ID: `{reseller_id}`", ""]
+    cur.execute(
+        """
+        SELECT ppp.client_user_id, ppp.pid, ppp.price, p.title
+        FROM pos_product_prices ppp
+        LEFT JOIN products p ON p.pid=ppp.pid
+        WHERE ppp.reseller_id=?
+        ORDER BY ppp.client_user_id ASC, ppp.pid ASC
+        LIMIT 150
+        """,
+        (reseller_id,),
+    )
+    prod_rows = cur.fetchall()
+    if prod_rows:
+        lines.append("🛍 Auto Products:")
+        for client_uid, pid, price, title in prod_rows:
+            lines.append(f"• Client `{client_uid}` | PID `{pid}` | *{float(price):.3f}{CURRENCY}* | {title or '-'}")
+        lines.append("")
+    cur.execute(
+        """
+        SELECT pmp.client_user_id, pmp.pkey, pmp.price
+        FROM pos_manual_prices pmp
+        WHERE pmp.reseller_id=?
+        ORDER BY pmp.client_user_id ASC, pmp.pkey ASC
+        LIMIT 150
+        """,
+        (reseller_id,),
+    )
+    manual_rows = cur.fetchall()
+    if manual_rows:
+        lines.append("⚡ Manual Prices:")
+        for client_uid, pkey, price in manual_rows:
+            lines.append(f"• Client `{client_uid}` | Key `{pkey}` | *{float(price):.3f}{CURRENCY}*")
+        lines.append("")
+    if not prod_rows and not manual_rows:
+        lines.append("لا توجد أسعار خاصة محفوظة لعملائك حتى الآن.")
+        lines.append("")
+    lines.append("استخدم أزرار POS لتعديل أسعار المنتجات أو الأسعار اليدوية.")
+    return "\n".join(lines)[:3800]
+
 def is_reseller(uid: int) -> bool:
     cur.execute("SELECT active FROM resellers WHERE user_id=?", (uid,))
     row = cur.fetchone()
@@ -816,6 +963,8 @@ def add_reseller(uid: int):
 
 def remove_reseller(uid: int):
     cur.execute("DELETE FROM reseller_clients WHERE reseller_id=?", (uid,))
+    cur.execute("DELETE FROM pos_product_prices WHERE reseller_id=?", (uid,))
+    cur.execute("DELETE FROM pos_manual_prices WHERE reseller_id=?", (uid,))
     cur.execute("DELETE FROM resellers WHERE user_id=?", (uid,))
     con.commit()
 
@@ -909,9 +1058,10 @@ def kb_pos_panel(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
             [InlineKeyboardButton("➕ Add Client", callback_data="pos:addclient"), InlineKeyboardButton("➖ Remove Client", callback_data="pos:removeclient")],
-            [InlineKeyboardButton("🎯 Set Client Price", callback_data="pos:setprice"), InlineKeyboardButton("💸 Charge Client", callback_data="pos:charge")],
-            [InlineKeyboardButton("📌 My Clients", callback_data="pos:clients"), InlineKeyboardButton(f"💰 Profit {profit:.3f}{CURRENCY}", callback_data="pos:profit")],
-            [InlineKeyboardButton("🔄 Transfer Profit to Balance", callback_data="pos:profit:transfer")],
+            [InlineKeyboardButton("🎯 Product Price", callback_data="pos:setprice"), InlineKeyboardButton("⚡ Manual Price", callback_data="pos:setmanualprice")],
+            [InlineKeyboardButton("📌 Price List", callback_data="pos:prices"), InlineKeyboardButton("💸 Charge Client", callback_data="pos:charge")],
+            [InlineKeyboardButton("📢 Notify Clients", callback_data="pos:broadcast"), InlineKeyboardButton("📌 My Clients", callback_data="pos:clients")],
+            [InlineKeyboardButton(f"💰 Profit {profit:.3f}{CURRENCY}", callback_data="pos:profit"), InlineKeyboardButton("🔄 Transfer Profit", callback_data="pos:profit:transfer")],
             [InlineKeyboardButton("⬅️ Back", callback_data="goto:cats")],
         ]
     )
@@ -931,33 +1081,6 @@ def pos_panel_text(uid: int) -> str:
         "• تحديد سعر خاص لكل عميل\n"
         "• شحن رصيد العميل من رصيدك\n"
         "• تحويل أرباحك المجمعة إلى رصيدك"
-    )
-
-
-def kb_pos_guest() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("💬 Contact Support", url=to_tme(SUPPORT_CHAT))],
-            [InlineKeyboardButton("⬅️ Back", callback_data="goto:cats")],
-        ]
-    )
-
-
-def pos_guest_text(uid: int) -> str:
-    reseller_id = get_client_reseller_id(uid)
-    if reseller_id is not None:
-        return (
-            "🏪 *POS Panel*\n\n"
-            f"👤 Your ID: `{uid}`\n"
-            f"🔗 Linked POS: `{reseller_id}`\n\n"
-            "أنت عميل تابع لنقطة بيع، لذلك الأسعار الخاصة تطبق تلقائياً عند الشراء.\n"
-            "لشحن الرصيد تواصل مع نقطة البيع التابعة لك أو مع الدعم."
-        )
-    return (
-        "🏪 *POS Panel*\n\n"
-        f"👤 Your ID: `{uid}`\n\n"
-        "هذه القائمة تعمل فقط للحسابات المفعلة كنقطة بيع.\n"
-        "أرسل الـ ID الخاص بك للإدارة ليتم تفعيلك كنقطة بيع، أو تواصل مع الدعم."
     )
 
 
@@ -1002,7 +1125,7 @@ def kb_products(cid: int, viewer_uid: Optional[int] = None) -> InlineKeyboardMar
     rows = []
     for pid, title, price in items:
         stock = product_stock(pid)
-        show_price = get_user_product_price(viewer_uid, pid, float(price)) if viewer_uid else float(price)
+        show_price = effective_product_price(viewer_uid, pid, float(price)) if viewer_uid else float(price)
         label = f"{title} | {money(float(show_price))} | 📦{stock}"
         rows.append([InlineKeyboardButton(label[:62], callback_data=f"view:{pid}")])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="back:cats")])
@@ -1245,7 +1368,7 @@ def _ff_calc_totals(cart: Dict[str, int], uid: Optional[int] = None):
         if not pack:
             continue
         _, title, diamonds = pack
-        price = get_user_manual_price(uid, sku, get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0)))
+        price = effective_manual_price(uid, sku, get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0)))
         total_price += float(price) * qty
         total_diamonds += diamonds * qty
         lines.append((title, qty, float(price), diamonds))
@@ -1263,8 +1386,8 @@ def kb_manual_services() -> InlineKeyboardMarkup:
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="goto:cats")])
     return InlineKeyboardMarkup(rows)
 def kb_shahid_plans(uid: Optional[int] = None) -> InlineKeyboardMarkup:
-    p3 = get_user_manual_price(uid, "SHAHID_MENA_3M", get_manual_price("SHAHID_MENA_3M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_3M"]))
-    p12 = get_user_manual_price(uid, "SHAHID_MENA_12M", get_manual_price("SHAHID_MENA_12M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_12M"]))
+    p3 = effective_manual_price(uid, "SHAHID_MENA_3M", get_manual_price("SHAHID_MENA_3M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_3M"]))
+    p12 = effective_manual_price(uid, "SHAHID_MENA_12M", get_manual_price("SHAHID_MENA_12M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_12M"]))
     rows = []
     if manual_flag_enabled("SHAHID_MENA_3M_ENABLED"):
         rows.append([InlineKeyboardButton(f"Shahid [MENA] | 3 Month | {p3:.3f}{CURRENCY}", callback_data="manual:shahid:MENA_3M")])
@@ -1289,7 +1412,7 @@ def kb_ff_menu(context, uid: Optional[int] = None) -> InlineKeyboardMarkup:
     for sku, title, _ in FF_PACKS:
         qty = int(cart.get(sku, 0))
         suffix = f"  🧺[{qty}]" if qty > 0 else ""
-        price = get_user_manual_price(uid, sku, get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0)))
+        price = effective_manual_price(uid, sku, get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0)))
         rows.append([InlineKeyboardButton(f"{title} 💎 | {float(price):.3f}{CURRENCY}{suffix}", callback_data=f"manual:ff:add:{sku}")])
     rows.append([InlineKeyboardButton("🗑 Clear Cart", callback_data="manual:ff:clear")])
     rows.append([InlineKeyboardButton("✅ Proceed to Checkout", callback_data="manual:ff:checkout")])
@@ -1440,12 +1563,9 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if t == "☎️ Contact Support":
         return await show_support(update, context)
     if t == "🏪 POS Panel":
-        uid = update.effective_user.id
-        if is_reseller(uid):
-            return await update.message.reply_text(pos_panel_text(uid), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(uid))
-        if admin_role(uid) == ROLE_OWNER:
-            return await update.message.reply_text(reseller_admin_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_reseller_admin_panel())
-        return await update.message.reply_text(pos_guest_text(uid), parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_MENU)
+        if not is_reseller(update.effective_user.id):
+            return await update.message.reply_text("❌ هذه القائمة متاحة لنقاط البيع فقط.", reply_markup=REPLY_MENU)
+        return await update.message.reply_text(pos_panel_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
     if t == "⚡ Manual Order":
         # ✅ enforce hours
         if not manual_open_now() and not is_admin_any(update.effective_user.id):
@@ -1497,7 +1617,7 @@ async def qty_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Product not found.")
         return ConversationHandler.END
     title, base_price = row
-    price = get_user_product_price(update.effective_user.id, pid, float(base_price))
+    price = effective_product_price(update.effective_user.id, pid, float(base_price))
     total = float(price) * qty
     client_ref = secrets.token_hex(10)
     context.user_data[UD_ORDER_CLIENT_REF] = client_ref
@@ -1619,6 +1739,15 @@ async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     price = float(context.user_data.get(UD_MANUAL_PRICE, 0))
     email = context.user_data.get(UD_MANUAL_EMAIL)
     plan_title = context.user_data.get(UD_MANUAL_PLAN_TITLE, "")
+    admin_base_price = 0.0
+    reseller_id = get_client_reseller_id(uid)
+    plan_key = None
+    if plan_title == "Shahid [MENA] | 3 Month":
+        plan_key = "SHAHID_MENA_3M"
+    elif plan_title == "Shahid [MENA] | 12 Month":
+        plan_key = "SHAHID_MENA_12M"
+    if plan_key:
+        admin_base_price = get_user_manual_price(uid, plan_key, get_manual_price(plan_key, MANUAL_PRICE_DEFAULTS.get(plan_key, 0.0)))
     if service != "SHAHID" or price <= 0 or not email or not plan_title:
         await update.message.reply_text("❌ Session expired. Open Manual Order again.", reply_markup=REPLY_MENU)
         return ConversationHandler.END
@@ -1640,6 +1769,9 @@ async def manual_pass_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     con.commit()
     mid = cur.lastrowid
+    margin = float(price) - float(admin_base_price)
+    if reseller_id and margin > 1e-9:
+        add_reseller_profit(reseller_id, margin, "POS_MANUAL_MARGIN", str(mid), f"client={uid} key={plan_key or '-'}")
     await update.message.reply_text(
         f"✅ Manual order created!\n"
         f"🧾 Order ID: {mid}\n"
@@ -1694,6 +1826,12 @@ async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     cart = _ff_cart_get(context)
     total_price, total_diamonds, lines = _ff_calc_totals(cart, uid=uid)
+    reseller_id = get_client_reseller_id(uid)
+    admin_base_total = 0.0
+    for sku, qty in cart.items():
+        if int(qty or 0) <= 0:
+            continue
+        admin_base_total += get_user_manual_price(uid, sku, get_manual_price(sku, MANUAL_PRICE_DEFAULTS.get(sku, 0.0))) * int(qty)
     if not lines or total_price <= 0:
         await update.message.reply_text("🛒 Cart is empty. Open Manual Order again.", reply_markup=REPLY_MENU)
         return ConversationHandler.END
@@ -1720,6 +1858,9 @@ async def ff_playerid_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     con.commit()
     mid = cur.lastrowid
+    margin = float(total_price) - float(admin_base_total)
+    if reseller_id and margin > 1e-9:
+        add_reseller_profit(reseller_id, margin, "POS_MANUAL_MARGIN", str(mid), f"client={uid} freefire_mena")
     await update.message.reply_text(
         f"✅ Manual order created!\n"
         f"🧾 Order ID: {mid}\n"
@@ -2039,12 +2180,9 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "goto:balance" or data == "goto:topup":
         return await show_balance(update, context)
     if data == "pos:panel":
-        uid = update.effective_user.id
-        if is_reseller(uid):
-            return await q.edit_message_text(pos_panel_text(uid), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(uid))
-        if admin_role(uid) == ROLE_OWNER:
-            return await q.edit_message_text(reseller_admin_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_reseller_admin_panel())
-        return await q.edit_message_text(pos_guest_text(uid), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_guest())
+        if not is_reseller(update.effective_user.id):
+            return await q.edit_message_text("❌ POS only.")
+        return await q.edit_message_text(pos_panel_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
     if data == "pos:clients":
         if not is_reseller(update.effective_user.id):
             return await q.edit_message_text("❌ POS only.")
@@ -2128,12 +2266,12 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not manual_flag_enabled("SHAHID_MENA_3M_ENABLED"):
                 return await q.edit_message_text("⛔ باقة Shahid 3M معطلة حالياً.", reply_markup=kb_shahid_plans(update.effective_user.id))
             plan_title = "Shahid [MENA] | 3 Month"
-            price = get_user_manual_price(update.effective_user.id, "SHAHID_MENA_3M", get_manual_price("SHAHID_MENA_3M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_3M"]))
+            price = effective_manual_price(update.effective_user.id, "SHAHID_MENA_3M", get_manual_price("SHAHID_MENA_3M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_3M"]))
         elif plan == "MENA_12M":
             if not manual_flag_enabled("SHAHID_MENA_12M_ENABLED"):
                 return await q.edit_message_text("⛔ باقة Shahid 12M معطلة حالياً.", reply_markup=kb_shahid_plans(update.effective_user.id))
             plan_title = "Shahid [MENA] | 12 Month"
-            price = get_user_manual_price(update.effective_user.id, "SHAHID_MENA_12M", get_manual_price("SHAHID_MENA_12M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_12M"]))
+            price = effective_manual_price(update.effective_user.id, "SHAHID_MENA_12M", get_manual_price("SHAHID_MENA_12M", MANUAL_PRICE_DEFAULTS["SHAHID_MENA_12M"]))
         else:
             return await q.edit_message_text("❌ Unknown plan.")
         uid = update.effective_user.id
@@ -2691,7 +2829,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text("❌ Product not found.")
         title, base_price, cid = row
         stock = product_stock(pid)
-        show_price = get_user_product_price(update.effective_user.id, pid, float(base_price))
+        show_price = effective_product_price(update.effective_user.id, pid, float(base_price))
         custom_note = "\n🏷 Special customer price applied" if abs(float(show_price) - float(base_price)) > 1e-9 else ""
         text = (
             f"🎁 *{title}*\n\n"
@@ -2744,7 +2882,8 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await q.edit_message_text("❌ Product not found.")
         title, base_price = row
         uid = update.effective_user.id
-        price = get_user_product_price(uid, pid, float(base_price))
+        admin_base_for_user = get_user_product_price(uid, pid, float(base_price))
+        price = effective_product_price(uid, pid, float(base_price))
         total = float(price) * qty
         ok_charge, bal_before, bal_after = charge_balance_logged(uid, total, "ORDER_PURCHASE", note=title)
         if not ok_charge:
@@ -2798,7 +2937,7 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         await send_codes_delivery(chat_id=uid, context=context, order_id=oid, codes=codes_list)
         reseller_id = get_client_reseller_id(uid)
-        margin = (float(price) - float(base_price)) * qty
+        margin = (float(price) - float(admin_base_for_user)) * qty
         if reseller_id and margin > 1e-9:
             add_reseller_profit(reseller_id, margin, "POS_ORDER_MARGIN", str(oid), f"client={uid} pid={pid} qty={qty}")
             try:
@@ -2940,7 +3079,7 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not reseller_can_manage_client(uid_admin, client_uid):
                 await update.message.reply_text("❌ هذا العميل ليس تابعاً لك.")
                 return ConversationHandler.END
-            clear_user_product_price(client_uid, pid)
+            clear_pos_client_product_price(uid_admin, client_uid, pid)
             await update.message.reply_text("✅ Client custom product price deleted.", reply_markup=REPLY_MENU)
             return ConversationHandler.END
         m = re.match(r"^(\d+)\s*\|\s*(\d+)\s*\|\s*([\d.]+)$", text)
@@ -2951,15 +3090,60 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not reseller_can_manage_client(uid_admin, client_uid):
             await update.message.reply_text("❌ هذا العميل ليس تابعاً لك.")
             return ConversationHandler.END
-        base_price = get_base_product_price(pid)
+        base_price = get_user_product_price(client_uid, pid, get_base_product_price(pid))
         if base_price <= 0:
             await update.message.reply_text("❌ Product not found.")
             return ConversationHandler.END
         if price + 1e-9 < base_price:
             await update.message.reply_text(f"❌ لا يمكن أقل من سعر البوت الأساسي: {base_price:.3f}{CURRENCY}")
             return ConversationHandler.END
-        set_user_product_price(client_uid, pid, price)
+        set_pos_client_product_price(uid_admin, client_uid, pid, price)
         await update.message.reply_text(f"✅ Client custom product price saved.\nBase: {base_price:.3f}{CURRENCY}\nSell: {price:.3f}{CURRENCY}", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+    if mode == "pos_set_manual_price":
+        if not is_reseller(uid_admin):
+            await update.message.reply_text("❌ Not allowed.")
+            return ConversationHandler.END
+        allowed_keys = {"SHAHID_MENA_3M", "SHAHID_MENA_12M", "FF_100", "FF_210", "FF_530", "FF_1080", "FF_2200"}
+        m_del = re.match(r"^del\s*\|\s*(\d+)\s*\|\s*([A-Z0-9_]+)\s*$", text, re.I)
+        if m_del:
+            client_uid = int(m_del.group(1)); key = m_del.group(2).upper()
+            if key not in allowed_keys:
+                await update.message.reply_text("❌ Unknown key.")
+                return ST_ADMIN_INPUT
+            if not reseller_can_manage_client(uid_admin, client_uid):
+                await update.message.reply_text("❌ هذا العميل ليس تابعاً لك.")
+                return ConversationHandler.END
+            clear_pos_client_manual_price(uid_admin, client_uid, key)
+            await update.message.reply_text("✅ Client custom manual price deleted.", reply_markup=REPLY_MENU)
+            return ConversationHandler.END
+        m = re.match(r"^(\d+)\s*\|\s*([A-Z0-9_]+)\s*\|\s*([\d.]+)$", text)
+        if not m:
+            await update.message.reply_text("❌ Format: client_user_id | KEY | price")
+            return ST_ADMIN_INPUT
+        client_uid, key, price = int(m.group(1)), m.group(2).upper(), float(m.group(3))
+        if key not in allowed_keys:
+            await update.message.reply_text("❌ Unknown key.")
+            return ST_ADMIN_INPUT
+        if not reseller_can_manage_client(uid_admin, client_uid):
+            await update.message.reply_text("❌ هذا العميل ليس تابعاً لك.")
+            return ConversationHandler.END
+        base_price = get_user_manual_price(client_uid, key, get_manual_price(key, MANUAL_PRICE_DEFAULTS.get(key, 0.0)))
+        if price + 1e-9 < base_price:
+            await update.message.reply_text(f"❌ لا يمكن أقل من سعر البوت/الأدمن الحالي: {base_price:.3f}{CURRENCY}")
+            return ConversationHandler.END
+        set_pos_client_manual_price(uid_admin, client_uid, key, price)
+        await update.message.reply_text(f"✅ Client custom manual price saved.\nBase/Admin: {base_price:.3f}{CURRENCY}\nSell: {price:.3f}{CURRENCY}", reply_markup=REPLY_MENU)
+        return ConversationHandler.END
+    if mode == "pos_broadcast_clients":
+        if not is_reseller(uid_admin):
+            await update.message.reply_text("❌ Not allowed.")
+            return ConversationHandler.END
+        msg = (update.message.text or "").strip()
+        if not msg:
+            await update.message.reply_text("❌ Send message text first.")
+        sent, failed = await broadcast_to_reseller_clients(context, uid_admin, f"📢 إشعار من نقطة البيع\n\n{msg}")
+        await update.message.reply_text(f"✅ Client broadcast finished.\nSent: {sent}\nFailed: {failed}", reply_markup=REPLY_MENU)
         return ConversationHandler.END
     if mode == "pos_charge_client":
         if not is_reseller(uid_admin):
