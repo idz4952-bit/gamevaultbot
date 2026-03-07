@@ -605,21 +605,6 @@ def ensure_user_exists(user_id: int, username: str = "", first_name: str = ""):
         (user_id, username, first_name),
     )
     con.commit()
-
-def get_user_brief(user_id: int) -> str:
-    ensure_user_exists(user_id)
-    cur.execute("SELECT username, first_name FROM users WHERE user_id=?", (user_id,))
-    row = cur.fetchone()
-    if not row:
-        return f"{user_id}"
-    username = (row[0] or "").strip()
-    first_name = (row[1] or "").strip()
-    label = f"{user_id}"
-    if username:
-        label += f" (@{username})"
-    elif first_name:
-        label += f" ({first_name})"
-    return label
 def is_suspended(uid: int) -> bool:
     ensure_user_exists(uid)
     cur.execute("SELECT suspended FROM users WHERE user_id=?", (uid,))
@@ -1064,8 +1049,12 @@ def remove_reseller(uid: int):
     cur.execute("DELETE FROM reseller_clients WHERE reseller_id=?", (uid,))
     cur.execute("DELETE FROM pos_product_prices WHERE reseller_id=?", (uid,))
     cur.execute("DELETE FROM pos_manual_prices WHERE reseller_id=?", (uid,))
-    cur.execute("DELETE FROM reseller_profit_log WHERE reseller_id=?", (uid,))
     cur.execute("DELETE FROM resellers WHERE user_id=?", (uid,))
+    con.commit()
+
+def clear_all_pos_prices_for_client(reseller_id: int, client_uid: int):
+    cur.execute("DELETE FROM pos_product_prices WHERE reseller_id=? AND client_user_id=?", (reseller_id, client_uid))
+    cur.execute("DELETE FROM pos_manual_prices WHERE reseller_id=? AND client_user_id=?", (reseller_id, client_uid))
     con.commit()
 
 def reseller_profit_balance(uid: int) -> float:
@@ -1121,17 +1110,9 @@ def assign_client_to_reseller(reseller_id: int, client_uid: int) -> Tuple[bool, 
     return True, "تم ربط العميل بنقطة البيع."
 
 def remove_client_from_reseller(reseller_id: int, client_uid: int) -> bool:
+    clear_all_pos_prices_for_client(reseller_id, client_uid)
     cur.execute("DELETE FROM reseller_clients WHERE reseller_id=? AND client_user_id=?", (reseller_id, client_uid))
     ch = cur.rowcount
-    if ch:
-        cur.execute(
-            "DELETE FROM pos_product_prices WHERE reseller_id=? AND client_user_id=?",
-            (reseller_id, client_uid),
-        )
-        cur.execute(
-            "DELETE FROM pos_manual_prices WHERE reseller_id=? AND client_user_id=?",
-            (reseller_id, client_uid),
-        )
     con.commit()
     return bool(ch)
 
@@ -1166,11 +1147,12 @@ def kb_pos_panel(uid: int) -> InlineKeyboardMarkup:
     profit = reseller_profit_balance(uid)
     return InlineKeyboardMarkup(
         [
-            [InlineKeyboardButton("➕ Add Client", callback_data="pos:addclient"), InlineKeyboardButton("➖ Remove Client", callback_data="pos:removeclient")],
+            [InlineKeyboardButton("🛒 Open Store", callback_data="goto:cats")],
             [InlineKeyboardButton("🎯 Auto Price", callback_data="pos:setprice"), InlineKeyboardButton("🛠 Manual Price", callback_data="pos:setmanual")],
             [InlineKeyboardButton("📦 Auto Products", callback_data="pos:catalog:auto"), InlineKeyboardButton("🧾 Manual Keys", callback_data="pos:catalog:manual")],
-            [InlineKeyboardButton("📌 Clients", callback_data="pos:clients"), InlineKeyboardButton("💸 Charge Client", callback_data="pos:charge")],
             [InlineKeyboardButton("📋 Auto Prices", callback_data="pos:prices:auto"), InlineKeyboardButton("📋 Manual Prices", callback_data="pos:prices:manual")],
+            [InlineKeyboardButton("➕ Add Client", callback_data="pos:addclient"), InlineKeyboardButton("➖ Remove Client", callback_data="pos:removeclient")],
+            [InlineKeyboardButton("📌 Clients", callback_data="pos:clients"), InlineKeyboardButton("💸 Charge Client", callback_data="pos:charge")],
             [InlineKeyboardButton("📢 Notify My Clients", callback_data="pos:notify"), InlineKeyboardButton(f"💰 Profit {profit:.3f}{CURRENCY}", callback_data="pos:profit")],
             [InlineKeyboardButton("🔄 Transfer Profit to Balance", callback_data="pos:profit:transfer")],
             [InlineKeyboardButton("⬅️ Back", callback_data="goto:cats")],
@@ -1603,9 +1585,6 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     upsert_user(update.effective_user)
     ensure_user_exists(ADMIN_ID)
     await update.message.reply_text("✅ Bot is online! 🚀", reply_markup=REPLY_MENU)
-async def id_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    upsert_user(update.effective_user)
-    await update.message.reply_text(f"🆔 Your ID: `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_MENU)
 async def show_categories(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user and must_block_user(update):
         return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
@@ -1671,7 +1650,10 @@ async def show_support(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         await update.callback_query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=kb_support())
 def smart_reply(msg: str) -> Optional[str]:
-    m = msg.lower()
+    raw = (msg or "").strip()
+    m = raw.lower()
+    if raw in {"id", "/id", "ايدي", "ID", "Id"}:
+        return "__SHOW_ID__"
     if any(x in m for x in ["price", "سعر", "كم", "ثمن"]):
         return "💡 الأسعار تظهر داخل 🛒 Our Products → اختر القسم."
     if any(x in m for x in ["balance", "رصيد", "wallet", "محفظة"]):
@@ -1690,8 +1672,6 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return await show_support(update, context)
         return await update.message.reply_text("⛔ حسابك موقوف. تواصل مع الدعم.", reply_markup=kb_support())
     t = (update.message.text or "").strip()
-    if t.lower() == "id":
-        return await update.message.reply_text(f"🆔 Your ID: `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_MENU)
     if t == "🛒 Our Products":
         return await show_categories(update, context)
     if t == "💰 My Balance":
@@ -1714,6 +1694,8 @@ async def menu_router(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         return await update.message.reply_text("⚡ *MANUAL ORDER*\nSelect a service:", parse_mode=ParseMode.MARKDOWN, reply_markup=kb_manual_services())
     hint = smart_reply(t)
+    if hint == "__SHOW_ID__":
+        return await update.message.reply_text(f"🆔 Your ID: `{update.effective_user.id}`", parse_mode=ParseMode.MARKDOWN, reply_markup=REPLY_MENU)
     if hint:
         return await update.message.reply_text(hint, reply_markup=REPLY_MENU)
     await update.message.reply_text("Use the menu 👇", reply_markup=REPLY_MENU)
@@ -2391,11 +2373,11 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data == "pos:catalog:auto":
         if not is_reseller(update.effective_user.id):
             return await q.edit_message_text("❌ POS only.")
-        return await q.edit_message_text(pos_all_products_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
+        return await q.edit_message_text(pos_all_products_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
     if data == "pos:catalog:manual":
         if not is_reseller(update.effective_user.id):
             return await q.edit_message_text("❌ POS only.")
-        return await q.edit_message_text(pos_all_manual_keys_text(), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
+        return await q.edit_message_text(pos_all_manual_keys_text(update.effective_user.id), parse_mode=ParseMode.MARKDOWN, reply_markup=kb_pos_panel(update.effective_user.id))
     if data == "pos:notify":
         if not is_reseller(update.effective_user.id):
             return await q.edit_message_text("❌ POS only.")
@@ -3219,6 +3201,38 @@ async def on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN,
         )
         return ST_TOPUP_DETAILS
+def _parse_pos_price_input(text: str):
+    t = (text or "").strip()
+    m = re.match(r"^del\s*\|\s*(\d+)\s*\|\s*(\d+)$", t, re.I)
+    if m:
+        return ("delete_client_product", int(m.group(1)), int(m.group(2)))
+    m = re.match(r"^del\s*\|\s*(\d+)$", t, re.I)
+    if m:
+        return ("delete_self_product", int(m.group(1)))
+    m = re.match(r"^(\d+)\s*\|\s*(\d+)\s*\|\s*([\d.]+)$", t)
+    if m:
+        return ("set_client_product", int(m.group(1)), int(m.group(2)), float(m.group(3)))
+    m = re.match(r"^(\d+)\s*\|\s*([\d.]+)$", t)
+    if m:
+        return ("set_self_product", int(m.group(1)), float(m.group(2)))
+    return None
+
+def _parse_pos_manual_input(text: str):
+    t = (text or "").strip()
+    m = re.match(r"^del\s*\|\s*(\d+)\s*\|\s*([A-Za-z0-9_]+)$", t, re.I)
+    if m:
+        return ("delete_client_manual", int(m.group(1)), m.group(2).upper())
+    m = re.match(r"^del\s*\|\s*([A-Za-z0-9_]+)$", t, re.I)
+    if m:
+        return ("delete_self_manual", m.group(1).upper())
+    m = re.match(r"^(\d+)\s*\|\s*([A-Za-z0-9_]+)\s*\|\s*([\d.]+)$", t)
+    if m:
+        return ("set_client_manual", int(m.group(1)), m.group(2).upper(), float(m.group(3)))
+    m = re.match(r"^([A-Za-z0-9_]+)\s*\|\s*([\d.]+)$", t)
+    if m:
+        return ("set_self_manual", m.group(1).upper(), float(m.group(2)))
+    return None
+
 # =========================
 # Admin input (text + file)
 # =========================
@@ -3254,15 +3268,18 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if ok:
             try:
                 await context.bot.send_message(
-                    client_uid,
-                    (
-                        "✅ تم ربط حسابك بنقطة بيع داخل البوت.\n"
+                    chat_id=client_uid,
+                    text=(
+                        "✅ تم ربط حسابك بنقطة بيع.\n"
                         f"🏪 POS ID: `{uid_admin}`\n"
-                        "🛒 الآن أي أسعار خاصة بنقطة البيع ستظهر لك تلقائياً داخل المنتجات والخدمات اليدوية."
+                        "يمكنك الآن فتح المتجر وستظهر لك الأسعار الخاصة إذا تم ضبطها لك.\n"
+                        "ولشحن الرصيد تواصل مع نقطة البيع الخاصة بك."
                     ),
                     parse_mode=ParseMode.MARKDOWN,
                     reply_markup=REPLY_MENU,
                 )
+            except Exception:
+                logger.exception("Failed notifying client %s about POS attach", client_uid)
             except Exception:
                 logger.exception("Failed notifying client %s about POS attach", client_uid)
         await update.message.reply_text(("✅ " if ok else "❌ ") + msg, reply_markup=REPLY_MENU)
@@ -3276,15 +3293,14 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return ST_ADMIN_INPUT
         client_uid = int(text)
         ok = remove_client_from_reseller(uid_admin, client_uid)
-        if ok:
-            try:
-                await context.bot.send_message(
-                    client_uid,
-                    "ℹ️ تم فك ربطك من نقطة البيع داخل البوت. عادت أسعارك الافتراضية.",
-                    reply_markup=REPLY_MENU,
-                )
-            except Exception:
-                logger.exception("Failed notifying client %s about POS detach", client_uid)
+        try:
+            await context.bot.send_message(
+                target,
+                "✅ تم تفعيلك كنقطة بيع.\nاستخدم زر 🏪 POS Panel للدخول إلى لوحة نقطة البيع.\nويمكنك أيضاً فتح 🛒 Our Products والشراء مباشرة بحساب نقطة البيع بعد ضبط أسعارك.",
+                reply_markup=REPLY_MENU,
+            )
+        except Exception:
+            logger.exception("Failed notifying reseller %s", target)
         await update.message.reply_text(("✅ Client removed." if ok else "❌ Client not found under your POS."), reply_markup=REPLY_MENU)
         return ConversationHandler.END
     if mode == "pos_set_price":
@@ -3417,14 +3433,14 @@ async def admin_input(update: Update, context: ContextTypes.DEFAULT_TYPE):
         target = int(text)
         add_reseller(target)
         try:
-            await context.bot.send_message(target, "✅ تم تفعيلك كنقطة بيع.\nاستخدم زر 🏪 POS Panel للدخول إلى لوحة نقطة البيع.", reply_markup=REPLY_MENU)
+            await context.bot.send_message(
+                target,
+                "✅ تم تفعيلك كنقطة بيع.\nاستخدم زر 🏪 POS Panel للدخول إلى لوحة نقطة البيع.\nويمكنك أيضاً فتح 🛒 Our Products والشراء مباشرة بحساب نقطة البيع بعد ضبط أسعارك.",
+                reply_markup=REPLY_MENU,
+            )
         except Exception:
             logger.exception("Failed notifying reseller %s", target)
-        await update.message.reply_text(f"✅ Added POS: {target}", reply_markup=REPLY_MENU)
-        return ConversationHandler.END
-    if mode == "reseller_del":
-        if admin_role(uid_admin) != ROLE_OWNER:
-            await update.message.reply_text("❌ Not allowed.")
+
             return ConversationHandler.END
         if not text.isdigit():
             await update.message.reply_text("❌ Send user_id only.")
@@ -3975,7 +3991,6 @@ def build_app():
         allow_reentry=True,
     )
     app.add_handler(CommandHandler("start", start_cmd))
-    app.add_handler(CommandHandler("id", id_cmd))
     app.add_handler(CommandHandler("admin", admin_cmd))
     app.add_handler(CommandHandler("approvedep", approvedep_cmd))
     app.add_handler(CommandHandler("rejectdep", rejectdep_cmd))
